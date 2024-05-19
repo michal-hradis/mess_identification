@@ -17,27 +17,29 @@ from nets import net_factory
 
 
 class IdDataset(torch.utils.data.Dataset):
-    def __init__(self, lmdb_path, transform=None, augment=True, size_multiplier=1):
+    def __init__(self, lmdb_path, augment=True, size_multiplier=1):
         super().__init__()
         self.lmdb_path = lmdb_path
         self.txn = None
-        self.transform = transform
         self.augment = augment
         self.aug = None
         self.size_multiplier = size_multiplier
+        self.key_index = 1
 
-        with lmdb.open(self.lmdb_path) as env:
-            with env.begin() as txn:
+        with lmdb.open(self.lmdb_path, readonly=True) as env:
+            with env.begin(write=False) as txn:
                 all_keys = list(txn.cursor().iternext(values=False))
 
         self.keys = defaultdict(list)
         for k in all_keys:
-            self.keys[k.decode().split('_')[0]].append(k)
+            self.keys[k.decode().split('_')[self.key_index]].append(k)
 
-        if not self.augment:
-            self.restrict_data()
+        #if not self.augment:
+        #    self.restrict_data()
 
         self.key_list = list(self.keys)
+        self.all_keys = all_keys
+        self.key_to_idx = {k: i for i, k in enumerate(self.key_list)}
 
     def restrict_data(self, max_id=2000, max_id_size=2):
         import random
@@ -64,13 +66,26 @@ class IdDataset(torch.utils.data.Dataset):
 
         return image
 
-    def __getitem__(self, idx):
+    def init(self):
         if self.txn is None:
             env = lmdb.open(self.lmdb_path, readonly=True)
             self.txn = env.begin(write=False)
             if self.augment:
                 from augmentation import AUGMENTATIONS
                 self.aug = AUGMENTATIONS[self.augment]
+
+
+    def image_count(self):
+        return len(self.key_list)
+
+    def get_image(self, idx: int) -> (np.ndarray, int):
+        self.init()
+        key = self.all_keys[idx]
+        image = self._read_img(key)
+        return image, str(self.key_to_idx[key.decode().split('_')[self.key_index]])
+
+    def __getitem__(self, idx) -> (torch.Tensor, torch.Tensor, int):
+        self.init()
 
         idx = idx % len(self.key_list)
         key_idx = self.key_list[idx]
@@ -85,9 +100,8 @@ class IdDataset(torch.utils.data.Dataset):
         else:
             image1, image2 = images
 
-        if self.transform:
-            image1 = self.transform(image1)
-            image2 = self.transform(image2)
+        image1 = torch.from_numpy(image1).permute(2, 0, 1)
+        image2 = torch.from_numpy(image2).permute(2, 0, 1)
 
         return image1, image2, idx
 
@@ -128,7 +142,6 @@ def my_loss(emb, labels, old_emb=None, old_labels=None):
     # mask the same images on the main diagonal
     sim.fill_diagonal_(-1e20)
 
-    
     # maximum value for stable exp --- without the main diagonal which is not used
     with torch.no_grad():
         max_val = torch.amax(sim, dim=1, keepdim=True)
@@ -138,15 +151,6 @@ def my_loss(emb, labels, old_emb=None, old_labels=None):
         sim_old = emb @ old_emb.t()
         sim_old[labels.reshape(-1, 1) == old_labels.reshape(1, -1)] = -1e20
         sim_old = torch.exp(sim_old - max_val)
-
-    # keep only the hardest positives from new
-    '''with torch.no_grad():
-        same = labels.reshape(-1, 1) == labels.reshape(1, -1)
-        neg = 1 - same
-        pos_scores = sim * same
-        pos_scores[same == 0] = 1e7
-        pos_scores[pos_scores != torch.min(pos_scores, dim=1)] = 0
-        pos = pos_scores > 0'''
 
     with torch.no_grad():
         pos = labels.reshape(-1, 1) == labels.reshape(1, -1)
@@ -217,6 +221,68 @@ def test(iteration, name, model, dataset, device, max_img, max_query_img):
     return auc
 
 
+def test_retrieval(iteration, name, model, dataset, device, max_img=2000, batch_size=32, query_vis_count=16, result_vis_count=32):
+    all_images = []
+    all_labels = []
+    for i in range(min(max_img, dataset.image_count())):
+        img, label = dataset.get_image(i)
+        all_images.append(img)
+        all_labels.append(label)
+
+    embeddings = []
+    img_to_process = list(all_images)
+    model = model.eval()
+    with torch.no_grad():
+        while img_to_process:
+            batch = img_to_process[:batch_size]
+            img_to_process = img_to_process[batch_size:]
+            batch = np.stack(batch, axis=0)
+            batch = torch.from_numpy(batch).permute(0, 3, 1, 2).to(device)
+            res = model(batch)
+            embeddings.append(res)
+    model = model.train()
+
+    embeddings = torch.cat(embeddings, dim=0)
+    similarities = embeddings @ embeddings.t()
+    similarities = similarities.cpu().numpy()
+    all_labels = np.asarray(all_labels)
+
+    logging.info(f'SIMILARITIES {similarities.min()} {similarities.max()}, {similarities.shape}')
+
+
+    collage_ids = np.linspace(0, len(all_images) - 1, query_vis_count).astype(np.int)
+    result_collage = []
+
+    scores = []
+    labels = []
+    for i in range(similarities.shape[0]):
+        batch_sim = similarities[i]
+        batch_labels = all_labels[i] == all_labels
+        # remove the query image
+        batch_labels[i] = False
+        batch_sim[i] = -1e20
+        scores.append(batch_sim)
+        labels.append(batch_labels)
+
+        if i in collage_ids:
+            row = [all_images[i]]
+            best_ids = np.argsort(batch_sim)[::-1][:result_vis_count]
+            for id in best_ids:
+                row.append(all_images[id])
+            result_collage.append(np.concatenate(row, axis=1))
+
+    if result_collage:
+        result_collage = np.concatenate(result_collage, axis=0)
+        cv2.imwrite(f'result-{name}-{iteration:07d}.jpg', result_collage)
+
+    scores = np.concatenate(scores, axis=0)
+    labels = np.concatenate(labels, axis=0)
+
+    fpr, tpr, thr = roc_curve(labels, scores, pos_label=1)
+    auc = roc_auc_score(labels, scores)
+    return auc, fpr, tpr, thr
+
+
 def tile_images(images, step=16):
     lines = [np.concatenate(images[i:i+step], axis=1) for i in range(0, len(images), step)]
     return np.concatenate(lines, axis=0)
@@ -227,7 +293,7 @@ def main():
     logging.info(f'ARGS {args}')
 
     device = torch.device('cuda')
-    torch.multiprocessing.set_start_method('spawn')
+    #torch.multiprocessing.set_start_method('spawn')
 
     img_encoder = net_factory(args.backbone_config, args.decoder_config, emb_dim=args.emb_dim).to(device)
 
@@ -236,17 +302,18 @@ def main():
         logging.info(f'Loading image checkpoint {checkpoint_path}')
         img_encoder.load_state_dict(torch.load(checkpoint_path, map_location=device))
 
-    input_names = ["input_image"]
-    output_names = ["output_emb"]
     img_encoder.eval()
-    torch.onnx.export(img_encoder, torch.from_numpy(np.zeros((1, 3, 64, 64), dtype=np.float32)).to(device), 'model.onnx', verbose=False, input_names=input_names, output_names=output_names, opset_version=11)
+    #input_names = ["input_image"]
+    #output_names = ["output_emb"]
+    #torch.onnx.export(img_encoder, torch.from_numpy(np.zeros((1, 3, 64, 64), dtype=np.float32)).to(device), 'model.onnx', verbose=False, input_names=input_names, output_names=output_names, opset_version=11)
 
-    ds_trn = IdDataset(args.lmdb, transform=torchvision.transforms.ToTensor(), augment=args.augmentation, size_multiplier=2000)
-    dl_trn = DataLoader(ds_trn, num_workers=args.loader_count, batch_size=args.batch_size, shuffle=True, drop_last=True)
+    ds_trn = IdDataset(args.lmdb, augment=args.augmentation)
+    dl_trn = DataLoader(ds_trn, num_workers=args.loader_count, batch_size=args.batch_size, shuffle=True, drop_last=True,
+                        persistent_workers=True, pin_memory=True, prefetch_factor=2)
     print(f'TRN DATASET LEN: {len(ds_trn)}')
 
     if args.lmdb_tst:
-        ds_tst = IdDataset(args.lmdb_tst, transform=torchvision.transforms.ToTensor(), augment=None, size_multiplier=1)
+        ds_tst = IdDataset(args.lmdb_tst, augment=None, size_multiplier=1)
         print(f'TST DATASET LEN: {len(ds_tst)}')
     else:
         ds_tst = None
@@ -256,9 +323,8 @@ def main():
     else:
         optimizer = torch.optim.AdamW(img_encoder.parameters(), lr=args.learning_rate)
 
-    loss_history = [0] * args.start_iteration
+    loss_history = []
     iteration = args.start_iteration
-    last_epoch_iteration = args.start_iteration
 
     to_test = 20
     test_similarities = []
@@ -266,14 +332,14 @@ def main():
     label_history = []
     embed_history = []
 
+    t1 = time.time()
     for epoch in range(10000):
-        t1 = time.time()
         for images1, images2, labels in dl_trn:
             if iteration == args.start_iteration:
                 images = []
                 for i1, i2 in zip(images1.permute(0, 2, 3, 1).numpy(), images2.permute(0, 2, 3, 1).numpy()):
-                    images.append(i1 * 255)
-                    images.append(i2 * 255)
+                    images.append(i1)
+                    images.append(i2)
                 cv2.imwrite('images.jpg', tile_images(images), params=[int(cv2.IMWRITE_JPEG_QUALITY), 98])
 
 
@@ -303,11 +369,12 @@ def main():
 
             #    #miner_output = miner(all_emb, all_labels)
             #    #loss = loss_object(all_emb, all_labels, miner_output)
-            
-            if label_history:
-                loss = my_loss(embedding, labels, torch.cat(embed_history, dim=0), torch.cat(label_history, dim=0))
-            else:
-                loss = my_loss(embedding, labels)
+
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                if label_history:
+                    loss = my_loss(embedding, labels, torch.cat(embed_history, dim=0), torch.cat(label_history, dim=0))
+                else:
+                    loss = my_loss(embedding, labels)
 
             loss = loss + args.emb_reg_weight * torch.mean(embedding ** 2)
             loss.backward()
@@ -336,21 +403,32 @@ def main():
                 plt.savefig(f'cp-{iteration:07d}.png')
                 plt.close('all')
 
+                test_results = {}
                 if ds_tst is not None:
-                    tst_auc = test(iteration, 'tst', img_encoder, ds_tst, device, max_img=2000, max_query_img=2000)
+                    tst_auc, fpr, tpr, thr = test_retrieval(iteration, 'tst', img_encoder, ds_tst, device, max_img=2000, batch_size=32)
+                    test_results['tst'] = (tst_auc, fpr, tpr, thr)
                 else:
-                    tst_auc = 0
-                trn_auc = test(iteration, 'trn', img_encoder, ds_trn, device, max_img=1000, max_query_img=1000)
+                    tst_auc = -1
+                trn_auc, fpr, tpr, thr = test_retrieval(iteration, 'trn', img_encoder, ds_trn, device, max_img=2000, batch_size=32)
+                test_results['trn'] = (trn_auc, fpr, tpr, thr)
 
-                avg_loss = np.mean(loss_history[last_epoch_iteration:])
+                avg_loss = np.mean(loss_history)
                 torch.save(img_encoder.state_dict(), f'cp-{iteration:07d}.img.ckpt')
-                print(f'LOG {iteration} iterations:{iteration-last_epoch_iteration} trn_auc:{trn_auc:0.5f} tst_auc:{tst_auc:0.5f} loss:{avg_loss:0.6f} time:{time.time()-t1:.1f}s')
-                last_epoch_iteration = iteration
+                print(f'LOG {iteration} iterations:{iteration} trn_auc:{trn_auc:0.6f} tst_auc:{tst_auc:0.6f} loss:{avg_loss:0.6f} time:{time.time()-t1:.1f}s')
                 t1 = time.time()
                 test_similarities = []
                 test_labels = []
+                loss_history = []
 
-                #if dl_tst is not None:
+                fig, ax = plt.subplots()
+                for name, (auc, fpr, tpr, thr) in test_results.items():
+                    ax.semilogx(fpr, tpr, label=f'{name} AUC = {auc}')
+                ax.legend()
+                plt.xlim([0.000001, 1])
+                plt.savefig(f'cp-auc-{iteration:07d}.png')
+                plt.close('all')
+
+                # if dl_tst is not None:
                 #    #test(f'tsne-{iteration:07d}.trn.png', img_encoder, dl_trn, device)
                 #    test(f'tsne-{iteration:07d}.tst.png', img_encoder, dl_tst, device)
             iteration += 1

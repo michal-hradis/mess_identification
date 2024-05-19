@@ -58,6 +58,8 @@ class EmbeddingModel(torch.nn.Module):
         self.decoder = decoder
 
     def forward(self, x):
+        # input is uint8 [0, 255], we need to convert it to float and normalize
+        x = x.float() / 255.0
         x = self.encoder(x)[-1]
         x = self.decoder(x)
         return x
