@@ -98,6 +98,82 @@ AUGMENTATIONS = {
         iaa.Lambda(func_images=func_random_images_eraser)
     ]),
 
+    'POLYP':
+        iaa.Sequential([
+            iaa.Fliplr(0.5),
+            iaa.Flipud(0.5),
+            iaa.OneOf([iaa.geometric.Affine(scale=(0.9, 1.1), translate_percent=(-0.03, 0.03), rotate=(-5, 5),
+                                            shear=(-10, 10), order=1),
+                       iaa.geometric.PerspectiveTransform(scale=0.05),
+                       # random mirrors
+                       ]),
+            iaa.SomeOf(n=(1, 4), children=[
+                iaa.convolutional.DirectedEdgeDetect(alpha=(0.05, 0.15), direction=(0.0, 1.0)),
+                iaa.convolutional.EdgeDetect(alpha=(0.05, 0.10)),
+                iaa.convolutional.Emboss(alpha=(0.05, 0.15), strength=(0.2, 0.6)),
+                iaa.convolutional.Sharpen(alpha=(0.05, 0.15), lightness=(0.8, 1.2)),
+
+                iaa.color.AddToHue(value=(-24, 24)),
+                iaa.color.AddToBrightness(add=(-32, 32)),
+                iaa.color.AddToSaturation(value=(-32, 32)),
+                iaa.color.Grayscale(),
+                iaa.color.MultiplyBrightness(mul=(0.8, 1.2)),
+                iaa.color.MultiplyHue(mul=(-0.2, 0.2)),
+                iaa.color.MultiplySaturation(mul=(0.7, 1.3)),
+                iaa.color.Posterize(nb_bits=(4, 8)),
+
+                iaa.contrast.GammaContrast(gamma=(0.6, 1.8)),
+                iaa.contrast.LogContrast(gain=(0.6, 1.4)),
+
+                iaa.blur.GaussianBlur(sigma=(0.0, 3.5)),
+                iaa.blur.MotionBlur(k=(3, 9)),
+                iaa.arithmetic.AdditiveGaussianNoise(scale=(2, 10), per_channel=True),
+                iaa.arithmetic.AdditiveLaplaceNoise(scale=(2, 10), per_channel=True),
+            ]),
+            iaa.Lambda(func_images=func_random_images_eraser)
+        ]),
+    'POLYP_LITE':
+        iaa.Sequential([
+            iaa.Fliplr(0.5),
+            iaa.Flipud(0.5),
+            iaa.OneOf([iaa.geometric.Affine(scale=(0.9, 1.1), translate_percent=(-0.03, 0.03), rotate=(-25, 25),
+                                            shear=(-15, 15), order=1),
+                       iaa.geometric.PerspectiveTransform(scale=0.05),
+                       ]),
+            iaa.SomeOf(n=(1, 4), children=[
+                iaa.convolutional.DirectedEdgeDetect(alpha=(0.05, 0.15), direction=(0.0, 1.0)),
+                iaa.convolutional.EdgeDetect(alpha=(0.05, 0.10)),
+                iaa.convolutional.Emboss(alpha=(0.05, 0.15), strength=(0.2, 0.6)),
+                iaa.convolutional.Sharpen(alpha=(0.05, 0.15), lightness=(0.8, 1.2)),
+
+                iaa.color.AddToHue(value=(-16, 16)),
+                iaa.color.AddToBrightness(add=(-24, 24)),
+                iaa.color.AddToSaturation(value=(-24, 24)),
+                iaa.color.Grayscale(),
+                iaa.color.MultiplyBrightness(mul=(0.8, 1.2)),
+                iaa.color.MultiplySaturation(mul=(0.8, 1.2)),
+
+                iaa.contrast.GammaContrast(gamma=(0.7, 1.3)),
+                iaa.contrast.LogContrast(gain=(0.8, 1.2)),
+
+                iaa.blur.GaussianBlur(sigma=(0.0, 1.5)),
+                iaa.blur.MotionBlur(k=(3, 6)),
+                iaa.arithmetic.AdditiveGaussianNoise(scale=(2, 10), per_channel=True),
+                iaa.arithmetic.AdditiveLaplaceNoise(scale=(2, 10), per_channel=True),
+            ]),
+            iaa.Lambda(func_images=func_random_images_eraser)
+        ]),
+    'POLYP_GEOMETRIC':
+        iaa.Sequential([
+            iaa.Fliplr(0.5),
+            iaa.Flipud(0.5),
+            iaa.OneOf([iaa.geometric.Affine(scale=(0.9, 1.1), translate_percent=(-0.03, 0.03), rotate=(-25, 25),
+                                            shear=(-15, 15), order=1),
+                       iaa.geometric.PerspectiveTransform(scale=0.05),
+                       ]),
+            iaa.Lambda(func_images=func_random_images_eraser)
+        ]),
+
 
 
 'LITE':
