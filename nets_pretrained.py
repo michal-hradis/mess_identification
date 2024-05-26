@@ -52,15 +52,19 @@ class ConvDecoder(torch.nn.Module):
 
 
 class EmbeddingModel(torch.nn.Module):
-    def __init__(self, encoder, decoder):
+    def __init__(self, encoder, decoder, normalize=False):
         super().__init__()
         self.encoder = encoder
         self.decoder = decoder
+        self.normalize = normalize
 
     def forward(self, x):
         # input is uint8 [0, 255], we need to convert it to float and normalize
         x = x.float() / 255.0
         x = self.encoder(x)[-1]
-        x = self.decoder(x)
-        return x
+        embeddings = self.decoder(x)
+        if self.normalize:
+            embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+
+        return embeddings
 

@@ -5,7 +5,6 @@ from torch.utils.data import DataLoader
 import torch
 import numpy as np
 import cv2
-import torchvision
 import matplotlib
 matplotlib.use('agg')
 import matplotlib.pyplot as plt
@@ -14,21 +13,24 @@ import lmdb
 from sklearn.metrics import roc_curve, roc_auc_score
 from collections import defaultdict
 from nets import net_factory
+from augmentation import AUGMENTATIONS
+from pytorch_metric_learning import losses
 
 
 class IdDataset(torch.utils.data.Dataset):
-    def __init__(self, lmdb_path, augment=True, size_multiplier=1):
+    def __init__(self, lmdb_path, augment=None, size_multiplier=1, single_image=False):
         super().__init__()
         self.lmdb_path = lmdb_path
         self.txn = None
         self.augment = augment
         self.aug = None
         self.size_multiplier = size_multiplier
-        self.key_index = 1
+        self.key_index = 0
+        self.single_image = single_image
 
         with lmdb.open(self.lmdb_path, readonly=True) as env:
             with env.begin(write=False) as txn:
-                all_keys = list(txn.cursor().iternext(values=False))
+                all_keys = list(txn.cursor().iternext(values=False))#[:5000]
 
         self.keys = defaultdict(list)
         for k in all_keys:
@@ -71,7 +73,6 @@ class IdDataset(torch.utils.data.Dataset):
             env = lmdb.open(self.lmdb_path, readonly=True)
             self.txn = env.begin(write=False)
             if self.augment:
-                from augmentation import AUGMENTATIONS
                 self.aug = AUGMENTATIONS[self.augment]
 
 
@@ -82,14 +83,24 @@ class IdDataset(torch.utils.data.Dataset):
         self.init()
         key = self.all_keys[idx]
         image = self._read_img(key)
-        return image, str(self.key_to_idx[key.decode().split('_')[self.key_index]])
+        id_key = key.decode().split('_')[self.key_index]
+        return image, self.key_to_idx[id_key]
 
     def __getitem__(self, idx) -> (torch.Tensor, torch.Tensor, int):
         self.init()
 
         idx = idx % len(self.key_list)
         key_idx = self.key_list[idx]
-        if len(self.keys[key_idx]) == 1:
+        if self.single_image:
+            keys = [self.keys[key_idx][0]]
+            images = [self._read_img(key) for key in keys]
+            if self.aug is not None:
+                image, = self.aug(images=images)
+            else:
+                image, = images
+            return torch.from_numpy(image).permute(2, 0, 1), idx
+
+        elif len(self.keys[key_idx]) == 1:
             keys = [self.keys[key_idx][0], self.keys[key_idx][0]]
         else:
             keys = np.random.choice(self.keys[key_idx], 2, replace=False)
@@ -105,11 +116,13 @@ class IdDataset(torch.utils.data.Dataset):
 
         return image1, image2, idx
 
+LOSSES = ['normalized_softmax', 'xent']
 
 def parseargs():
     parser = argparse.ArgumentParser(usage='Trains contrastive self-supervised training on artificial data.')
     parser.add_argument('--lmdb', required=True, help='Path to lmdb DB..')
     parser.add_argument('--lmdb-tst', required=False, help='Path to lmdb DB..')
+    parser.add_argument('--name', default='model', help='Name of the experiment and model.')
 
     parser.add_argument('--start-iteration', default=0, type=int)
     parser.add_argument('--max-iteration', default=500000, type=int)
@@ -121,9 +134,10 @@ def parseargs():
     parser.add_argument('--weight-decay', default=0.01, type=float)
     parser.add_argument('--temperature', default=0.5, type=float)
     parser.add_argument('--emb-reg-weight', default=1, type=float)
-    parser.add_argument('--augmentation', default='LITE')
+    parser.add_argument('--augmentation', default='LITE', help=f'Augmentation type. The options are {AUGMENTATIONS.keys()}.')
     parser.add_argument('--warmup-iterations', default=100, type=float)
-    parser.add_argument('--train-only-decoder', action='store_true')
+    parser.add_argument('--train-only-decoder', action='store_true', help='The encoder is frozen and only the decoder is trained.')
+    parser.add_argument('--no-emb-normalization', action='store_true', help="Do not normalize embeddings. Normalizes to unit length by default.")
 
     parser.add_argument('--backbone-config', default='{"type":"SM","name":"resnet34","weights":"imagenet","depth":5}')
     parser.add_argument('--decoder-config', default='{"type":"avg_pool"}')
@@ -131,6 +145,7 @@ def parseargs():
     parser.add_argument('--loader-count', default=6, type=int, help="Number of processes loading training data.")
     parser.add_argument('--batch-history', default=0, type=int, help="Number of old batches used for distance matrix.")
 
+    parser.add_argument('--loss', default='xent', help=f'Loss function. The options are {LOSSES}.')
 
     args = parser.parse_args()
     return args
@@ -221,13 +236,26 @@ def test(iteration, name, model, dataset, device, max_img, max_query_img):
     return auc
 
 
-def test_retrieval(iteration, name, model, dataset, device, max_img=2000, batch_size=32, query_vis_count=16, result_vis_count=32):
+def test_retrieval(iteration, name, model, dataset, device, max_img=2000, batch_size=32, query_vis_count=24, result_vis_count=32):
     all_images = []
     all_labels = []
     for i in range(min(max_img, dataset.image_count())):
         img, label = dataset.get_image(i)
         all_images.append(img)
         all_labels.append(label)
+
+    # get uqiue labels
+    #all_labels = np.asarray(all_labels)
+    #unique_labels = set(all_labels)
+    #for l in unique_labels:
+    #    # show all images of the same label as image using cv2.imshow
+    #    idx = np.where(all_labels == l)[0]
+    #    images = [all_images[i] for i in idx]
+    #    images = np.concatenate(images, axis=1)
+    #    cv2.imshow('i', images)
+    #    key = cv2.waitKey()
+    #    if key == 27:
+    #        break
 
     embeddings = []
     img_to_process = list(all_images)
@@ -265,10 +293,19 @@ def test_retrieval(iteration, name, model, dataset, device, max_img=2000, batch_
         labels.append(batch_labels)
 
         if i in collage_ids:
-            row = [all_images[i]]
+            image = cv2.copyMakeBorder(all_images[i], 2, 2, 2, 2, cv2.BORDER_CONSTANT, value=[255, 0, 0])
+            image = cv2.copyMakeBorder(image, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=[0, 0, 0])
+            row = [image]
+            query_label = all_labels[i]
             best_ids = np.argsort(batch_sim)[::-1][:result_vis_count]
             for id in best_ids:
-                row.append(all_images[id])
+                image = all_images[id]
+                if all_labels[id] == query_label:
+                    image = cv2.copyMakeBorder(image, 2, 2, 2, 2, cv2.BORDER_CONSTANT, value=[0, 255, 0])
+                else:
+                    image = cv2.copyMakeBorder(image, 2, 2, 2, 2, cv2.BORDER_CONSTANT, value=[0, 0, 255])
+                image = cv2.copyMakeBorder(image, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=[0, 0, 0])
+                row.append(image)
             result_collage.append(np.concatenate(row, axis=1))
 
     if result_collage:
@@ -295,28 +332,46 @@ def main():
     device = torch.device('cuda')
     #torch.multiprocessing.set_start_method('spawn')
 
-    img_encoder = net_factory(args.backbone_config, args.decoder_config, emb_dim=args.emb_dim).to(device)
+
+
+    img_encoder = net_factory(args.backbone_config, args.decoder_config, emb_dim=args.emb_dim, normalize=not args.no_emb_normalization
+                              ).to(device)
 
     if args.start_iteration > 0:
         checkpoint_path = f'cp-{args.start_iteration:07d}.img.ckpt'
         logging.info(f'Loading image checkpoint {checkpoint_path}')
         img_encoder.load_state_dict(torch.load(checkpoint_path, map_location=device))
 
-    img_encoder.eval()
+
+    single_image = args.loss in ['normalized_softmax']
+
+
     #input_names = ["input_image"]
     #output_names = ["output_emb"]
     #torch.onnx.export(img_encoder, torch.from_numpy(np.zeros((1, 3, 64, 64), dtype=np.float32)).to(device), 'model.onnx', verbose=False, input_names=input_names, output_names=output_names, opset_version=11)
 
-    ds_trn = IdDataset(args.lmdb, augment=args.augmentation)
+    ds_trn = IdDataset(args.lmdb, augment=args.augmentation, single_image=single_image)
     dl_trn = DataLoader(ds_trn, num_workers=args.loader_count, batch_size=args.batch_size, shuffle=True, drop_last=True,
-                        persistent_workers=True, pin_memory=True, prefetch_factor=2)
+                        persistent_workers=True, pin_memory=True)
     print(f'TRN DATASET LEN: {len(ds_trn)}')
 
     if args.lmdb_tst:
-        ds_tst = IdDataset(args.lmdb_tst, augment=None, size_multiplier=1)
+        ds_tst = IdDataset(args.lmdb_tst, augment=None, size_multiplier=1, single_image=single_image)
         print(f'TST DATASET LEN: {len(ds_tst)}')
     else:
         ds_tst = None
+
+
+    # Select loss
+    if args.loss == 'normalized_softmax':
+        loss_fce = losses.NormalizedSoftmaxLoss(len(ds_trn), args.emb_dim, temperature=args.temperature).to(device)
+        loss_optimizer = torch.optim.Adam(loss_fce.parameters(), lr=10)
+    elif args.loss == 'xent':
+        loss_fce = my_loss
+        loss_optimizer = None
+    else:
+        logging.error(f'Unknown loss function "{args.loss}". Available options are {LOSSES}.')
+        exit(-1)
 
     if args.train_only_decoder:
         optimizer = torch.optim.AdamW(img_encoder.decoder.parameters(), lr=args.learning_rate)
@@ -334,12 +389,23 @@ def main():
 
     t1 = time.time()
     for epoch in range(10000):
-        for images1, images2, labels in dl_trn:
+        for batch_data in dl_trn:
+            if len(batch_data) == 2:
+                images1, labels = batch_data
+                images2 = None
+            else:
+                images1, images2, labels = batch_data
+
             if iteration == args.start_iteration:
+                # save the first training batch for visualization
                 images = []
-                for i1, i2 in zip(images1.permute(0, 2, 3, 1).numpy(), images2.permute(0, 2, 3, 1).numpy()):
-                    images.append(i1)
-                    images.append(i2)
+                if images2 is None:
+                    for i in images1.permute(0, 2, 3, 1).numpy():
+                        images.append(i)
+                else:
+                    for i1, i2 in zip(images1.permute(0, 2, 3, 1).numpy(), images2.permute(0, 2, 3, 1).numpy()):
+                        images.append(i1)
+                        images.append(i2)
                 cv2.imwrite('images.jpg', tile_images(images), params=[int(cv2.IMWRITE_JPEG_QUALITY), 98])
 
 
@@ -349,17 +415,20 @@ def main():
             #    print(f'Unique labels in {iteration}: {unique_labels}')
             with torch.no_grad():
                 images1 = images1.to(device)
-                images2 = images2.to(device)
-                images = torch.cat([images1, images2], dim=0)
-                labels = torch.cat([labels, labels]).to(device)
+                if images2 is None:
+                    images = images1
+                    labels = labels.to(device)
+                else:
+                    images2 = images2.to(device)
+                    images = torch.cat([images1, images2], dim=0)
+                    labels = torch.cat([labels, labels]).to(device)
+
 
             if iteration - args.start_iteration <= args.warmup_iterations:
                 lr = (min(iteration - args.start_iteration, args.warmup_iterations) / args.warmup_iterations) ** 1.5 * args.learning_rate
                 for param_group in optimizer.param_groups:
                     param_group['lr'] = lr
 
-            optimizer.zero_grad()
-            embedding = img_encoder(images)
             #if label_history:
             #    all_emb = torch.cat([e for e in embed_history] + [embedding], dim=0)
             #    all_labels = torch.cat([e for e in label_history] + [labels], dim=0)
@@ -371,14 +440,22 @@ def main():
             #    #loss = loss_object(all_emb, all_labels, miner_output)
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                if label_history:
-                    loss = my_loss(embedding, labels, torch.cat(embed_history, dim=0), torch.cat(label_history, dim=0))
-                else:
-                    loss = my_loss(embedding, labels)
+                embedding = img_encoder(images)
+                #if label_history:
+                #    loss = my_loss(embedding, labels, torch.cat(embed_history, dim=0), torch.cat(label_history, dim=0))
+                #else:
+                loss = loss_fce(embedding, labels)
+
 
             loss = loss + args.emb_reg_weight * torch.mean(embedding ** 2)
             loss.backward()
             optimizer.step()
+
+            if loss_optimizer is not None:
+                loss_optimizer.step()
+                loss_optimizer.zero_grad()
+
+            optimizer.zero_grad()
             loss_history.append(loss.item())
 
             #sim = torch.mm(embedding, embedding.t()).detach().cpu().numpy()
@@ -427,6 +504,17 @@ def main():
                 plt.xlim([0.000001, 1])
                 plt.savefig(f'cp-auc-{iteration:07d}.png')
                 plt.close('all')
+
+                input_names = ["input_image"]
+                output_names = ["output_emb"]
+                torch.onnx.export(
+                    img_encoder,
+                    torch.from_numpy(np.zeros((1, images1.shape[1], images1.shape[2], images1.shape[3]), dtype=np.uint8)).to(device),
+                    f'{args.name}_{iteration:07d}.onnx', verbose=False, do_constant_folding=True, export_params=True,
+                    input_names=input_names, output_names=output_names, opset_version=11,
+                    #dynamic_axes={'input_image': {0, 'batch_size'}, 'output': {0: 'batch_size'}}
+                    )
+
 
                 # if dl_tst is not None:
                 #    #test(f'tsne-{iteration:07d}.trn.png', img_encoder, dl_trn, device)

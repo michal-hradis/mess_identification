@@ -4,7 +4,7 @@ import logging
 from nets_pretrained import PoolingDecoder, ConvDecoder, PretrainedEncoder, EmbeddingModel
 from nets_att_decoders import AttDecoder
 
-def net_factory(encoder_config, decoder_config, emb_dim):
+def net_factory(encoder_config, decoder_config, emb_dim, normalize=True):
     if type(encoder_config) == str:
         encoder_config = json.loads(encoder_config)
     if type(decoder_config) == str:
@@ -36,7 +36,7 @@ def net_factory(encoder_config, decoder_config, emb_dim):
         logging.error(f'Unknown decoder type "{decoder_config["type"]}"')
         exit(-1)
 
-    model = EmbeddingModel(encoder, decoder)
+    model = EmbeddingModel(encoder, decoder, normalize=normalize)
     return model
 
 def create_vgg_block(input_channels, output_channels, subsampling=(2, 2), layer_count=1):
