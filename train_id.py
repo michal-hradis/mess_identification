@@ -10,12 +10,15 @@ matplotlib.use('agg')
 import matplotlib.pyplot as plt
 import logging
 import lmdb
-from sklearn.metrics import roc_curve, roc_auc_score
+from sklearn.metrics import roc_curve, roc_auc_score, average_precision_score
 from collections import defaultdict
 from nets import net_factory
 from augmentation import AUGMENTATIONS
 from pytorch_metric_learning import losses
-
+from tqdm import tqdm
+from functools import partial
+import os
+import random
 
 class IdDataset(torch.utils.data.Dataset):
     def __init__(self, lmdb_path, augment=None, size_multiplier=1, single_image=False):
@@ -25,7 +28,7 @@ class IdDataset(torch.utils.data.Dataset):
         self.augment = augment
         self.aug = None
         self.size_multiplier = size_multiplier
-        self.key_index = 0
+        self.key_index = [0, 1]
         self.single_image = single_image
 
         with lmdb.open(self.lmdb_path, readonly=True) as env:
@@ -34,7 +37,7 @@ class IdDataset(torch.utils.data.Dataset):
 
         self.keys = defaultdict(list)
         for k in all_keys:
-            self.keys[k.decode().split('_')[self.key_index]].append(k)
+            self.keys[self.parse_key(k)].append(k)
 
         #if not self.augment:
         #    self.restrict_data()
@@ -42,6 +45,14 @@ class IdDataset(torch.utils.data.Dataset):
         self.key_list = list(self.keys)
         self.all_keys = all_keys
         self.key_to_idx = {k: i for i, k in enumerate(self.key_list)}
+        print(f"Unique keys: {len(self.key_list)}")
+        print(f"Max id size: {max([len(self.keys[k]) for k in self.keys])}")
+        print(f"Max id value: {max([v for v in self.key_to_idx.values()])}")
+
+    def parse_key(self, k: str) -> str:
+       k = k.decode().split('_')
+       k = [k[i] for i in self.key_index]
+       return '_'.join(k)
 
     def restrict_data(self, max_id=2000, max_id_size=2):
         import random
@@ -53,7 +64,7 @@ class IdDataset(torch.utils.data.Dataset):
         self.keys = {i: self.keys[i][:max_id_size] for i in ids}
 
     def __len__(self):
-        return len(self.key_list) * self.size_multiplier
+        return len(self.key_list)
 
     def _read_img(self, name):
         data = self.txn.get(name)
@@ -77,13 +88,13 @@ class IdDataset(torch.utils.data.Dataset):
 
 
     def image_count(self):
-        return len(self.key_list)
+        return len(self.all_keys)
 
     def get_image(self, idx: int) -> (np.ndarray, int):
         self.init()
         key = self.all_keys[idx]
         image = self._read_img(key)
-        id_key = key.decode().split('_')[self.key_index]
+        id_key = self.parse_key(key)
         return image, self.key_to_idx[id_key]
 
     def __getitem__(self, idx) -> (torch.Tensor, torch.Tensor, int):
@@ -92,7 +103,8 @@ class IdDataset(torch.utils.data.Dataset):
         idx = idx % len(self.key_list)
         key_idx = self.key_list[idx]
         if self.single_image:
-            keys = [self.keys[key_idx][0]]
+            keys = self.keys[key_idx]
+            keys = [random.choice(keys)]
             images = [self._read_img(key) for key in keys]
             if self.aug is not None:
                 image, = self.aug(images=images)
@@ -140,7 +152,7 @@ def parseargs():
     parser.add_argument('--no-emb-normalization', action='store_true', help="Do not normalize embeddings. Normalizes to unit length by default.")
 
     parser.add_argument('--backbone-config', default='{"type":"SM","name":"resnet34","weights":"imagenet","depth":5}')
-    parser.add_argument('--decoder-config', default='{"type":"avg_pool"}')
+    parser.add_argument('--decoder-config', default='{"type": "pool", "operation": "avg"}')
 
     parser.add_argument('--loader-count', default=6, type=int, help="Number of processes loading training data.")
     parser.add_argument('--batch-history', default=0, type=int, help="Number of old batches used for distance matrix.")
@@ -148,11 +160,12 @@ def parseargs():
     parser.add_argument('--loss', default='xent', help=f'Loss function. The options are {LOSSES}.')
 
     args = parser.parse_args()
+    print(args)
     return args
 
 
-def my_loss(emb, labels, old_emb=None, old_labels=None):
-    sim = emb @ emb.t()
+def my_loss(emb, labels, temperature=1,  old_emb=None, old_labels=None):
+    sim = (emb @ emb.t()) / temperature
 
     # mask the same images on the main diagonal
     sim.fill_diagonal_(-1e20)
@@ -163,7 +176,7 @@ def my_loss(emb, labels, old_emb=None, old_labels=None):
     sim = torch.exp(sim - max_val)
     if old_emb is not None:
         # mask old positives
-        sim_old = emb @ old_emb.t()
+        sim_old = (emb @ old_emb.t()) / temperature
         sim_old[labels.reshape(-1, 1) == old_labels.reshape(1, -1)] = -1e20
         sim_old = torch.exp(sim_old - max_val)
 
@@ -205,7 +218,7 @@ def test(iteration, name, model, dataset, device, max_img, max_query_img):
             batch = torch.stack(batch, dim=0).to(device)
             res = model(batch).cpu().numpy()
             all_data.append(res)
-        model.train()
+    model.train()
 
     all_data = np.concatenate(all_data, axis=0)
     all_labels = np.stack(all_labels, axis=0)
@@ -236,7 +249,8 @@ def test(iteration, name, model, dataset, device, max_img, max_query_img):
     return auc
 
 
-def test_retrieval(iteration, name, model, dataset, device, max_img=2000, batch_size=32, query_vis_count=24, result_vis_count=32):
+def test_retrieval(iteration, name, model, dataset, device, max_img=2000, batch_size=32, query_vis_count=16, result_vis_count=20):
+    t_start = time.time()
     all_images = []
     all_labels = []
     for i in range(min(max_img, dataset.image_count())):
@@ -278,26 +292,41 @@ def test_retrieval(iteration, name, model, dataset, device, max_img=2000, batch_
     logging.info(f'SIMILARITIES {similarities.min()} {similarities.max()}, {similarities.shape}')
 
 
-    collage_ids = np.linspace(0, len(all_images) - 1, query_vis_count).astype(np.int)
+    collage_ids = np.linspace(0, len(all_images) - 1, query_vis_count).astype(np.int64)
     result_collage = []
 
     scores = []
     labels = []
+    ap = []
+    auc = []
+    #counter=0
+    #for image, label in zip(all_images, all_labels):
+    #    os.makedirs(os.path.join(name, f'{label:05d}'), exist_ok=True)
+    #    file_name = os.path.join(name, f'{label:05d}', f'{counter:05d}.png')
+    #    counter += 1
+    #    cv2.imwrite(file_name, image)
+
+
+
     for i in range(similarities.shape[0]):
-        batch_sim = similarities[i]
-        batch_labels = all_labels[i] == all_labels
+        query_sim = similarities[i]
+        query_labels = all_labels[i] == all_labels
         # remove the query image
-        batch_labels[i] = False
-        batch_sim[i] = -1e20
-        scores.append(batch_sim)
-        labels.append(batch_labels)
+        query_labels[i] = False
+        query_sim[i] = -1e20
+        if np.any(query_labels):
+            auc.append(roc_auc_score(query_labels, query_sim))
+            ap.append(average_precision_score(query_labels, query_sim))
+
+        scores.append(query_sim)
+        labels.append(query_labels)
 
         if i in collage_ids:
             image = cv2.copyMakeBorder(all_images[i], 2, 2, 2, 2, cv2.BORDER_CONSTANT, value=[255, 0, 0])
             image = cv2.copyMakeBorder(image, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=[0, 0, 0])
             row = [image]
             query_label = all_labels[i]
-            best_ids = np.argsort(batch_sim)[::-1][:result_vis_count]
+            best_ids = np.argsort(query_sim)[::-1][:result_vis_count]
             for id in best_ids:
                 image = all_images[id]
                 if all_labels[id] == query_label:
@@ -316,13 +345,54 @@ def test_retrieval(iteration, name, model, dataset, device, max_img=2000, batch_
     labels = np.concatenate(labels, axis=0)
 
     fpr, tpr, thr = roc_curve(labels, scores, pos_label=1)
+    mean_ap = np.mean(ap)
+    mean_auc = np.mean(auc)
     auc = roc_auc_score(labels, scores)
-    return auc, fpr, tpr, thr
+    print(f'TEST TIME {name}: {time.time() - t_start}s')
+    return auc, mean_auc, fpr, tpr, thr, mean_ap
 
 
 def tile_images(images, step=16):
     lines = [np.concatenate(images[i:i+step], axis=1) for i in range(0, len(images), step)]
     return np.concatenate(lines, axis=0)
+
+
+def init_central_loss_embeddings(model: torch.nn.Module, dataset: IdDataset, loss_fce: torch.nn.Module, device: torch.device, batch_size: int = 32):
+    with torch.no_grad():
+        # Compute embeddings for all images and store them in the loss function
+        all_embeddings = []
+        all_labels = []
+        batch = []
+        model.eval()
+        for i in tqdm(range(dataset.image_count())):
+            img, label = dataset.get_image(i)
+            batch.append(img)
+            all_labels.append(label)
+            if len(batch) >= batch_size:
+                batch = np.stack(batch, axis=0)
+                batch = torch.from_numpy(batch).permute(0, 3, 1, 2).to(device)
+                res = model(batch)
+                all_embeddings.append(res)
+                batch = []
+        if batch:
+            batch = np.stack(batch, axis=0)
+            batch = torch.from_numpy(batch).permute(0, 3, 1, 2).to(device)
+            res = model(batch)
+            all_embeddings.append(res)
+
+        # average embeddings of each unique label
+        all_embeddings = torch.cat(all_embeddings, dim=0)
+        all_labels = np.asarray(all_labels)
+        unique_labels = set(all_labels)
+        wMat = list(loss_fce.parameters())[0]
+        print(wMat.shape, len(list(loss_fce.parameters())), np.max(unique_labels))
+        print(sorted(unique_labels))
+        for l in unique_labels:
+            idx = np.where(all_labels == l)[0]
+            embeddings = all_embeddings[idx]
+            embeddings = torch.mean(embeddings, dim=0)
+            # set the embedding in the loss function for the label - write into the weight matrix
+            wMat[:, l] = embeddings
 
 
 def main():
@@ -334,13 +404,14 @@ def main():
 
 
 
-    img_encoder = net_factory(args.backbone_config, args.decoder_config, emb_dim=args.emb_dim, normalize=not args.no_emb_normalization
+    model = net_factory(args.backbone_config, args.decoder_config, emb_dim=args.emb_dim, normalize=not args.no_emb_normalization
                               ).to(device)
 
+    print(model)
     if args.start_iteration > 0:
         checkpoint_path = f'cp-{args.start_iteration:07d}.img.ckpt'
         logging.info(f'Loading image checkpoint {checkpoint_path}')
-        img_encoder.load_state_dict(torch.load(checkpoint_path, map_location=device))
+        model.load_state_dict(torch.load(checkpoint_path, map_location=device))
 
 
     single_image = args.loss in ['normalized_softmax']
@@ -348,9 +419,10 @@ def main():
 
     #input_names = ["input_image"]
     #output_names = ["output_emb"]
-    #torch.onnx.export(img_encoder, torch.from_numpy(np.zeros((1, 3, 64, 64), dtype=np.float32)).to(device), 'model.onnx', verbose=False, input_names=input_names, output_names=output_names, opset_version=11)
+    #torch.onnx.export(model, torch.from_numpy(np.zeros((1, 3, 64, 64), dtype=np.float32)).to(device), 'model.onnx', verbose=False, input_names=input_names, output_names=output_names, opset_version=11)
 
-    ds_trn = IdDataset(args.lmdb, augment=args.augmentation, single_image=single_image)
+    size_multiplier = 100
+    ds_trn = IdDataset(args.lmdb, augment=args.augmentation, single_image=single_image, size_multiplier=size_multiplier)
     dl_trn = DataLoader(ds_trn, num_workers=args.loader_count, batch_size=args.batch_size, shuffle=True, drop_last=True,
                         persistent_workers=True, pin_memory=True)
     print(f'TRN DATASET LEN: {len(ds_trn)}')
@@ -361,22 +433,22 @@ def main():
     else:
         ds_tst = None
 
-
     # Select loss
     if args.loss == 'normalized_softmax':
-        loss_fce = losses.NormalizedSoftmaxLoss(len(ds_trn), args.emb_dim, temperature=args.temperature).to(device)
-        loss_optimizer = torch.optim.Adam(loss_fce.parameters(), lr=10)
+        loss_fce = losses.NormalizedSoftmaxLoss(len(ds_trn) // size_multiplier, args.emb_dim, temperature=args.temperature).to(device)
+        #init_central_loss_embeddings(model, ds_trn, loss_fce, device)
+        loss_optimizer = torch.optim.Adam(loss_fce.parameters(), lr=0.01)
     elif args.loss == 'xent':
-        loss_fce = my_loss
+        loss_fce = partial(my_loss, temperature=args.temperature)
         loss_optimizer = None
     else:
         logging.error(f'Unknown loss function "{args.loss}". Available options are {LOSSES}.')
         exit(-1)
 
     if args.train_only_decoder:
-        optimizer = torch.optim.AdamW(img_encoder.decoder.parameters(), lr=args.learning_rate)
+        optimizer = torch.optim.AdamW(model.decoder.parameters(), lr=args.learning_rate)
     else:
-        optimizer = torch.optim.AdamW(img_encoder.parameters(), lr=args.learning_rate)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
 
     loss_history = []
     iteration = args.start_iteration
@@ -389,14 +461,21 @@ def main():
 
     t1 = time.time()
     for epoch in range(10000):
+        if iteration > args.max_iteration:
+            break
+
         for batch_data in dl_trn:
             if len(batch_data) == 2:
                 images1, labels = batch_data
                 images2 = None
             else:
                 images1, images2, labels = batch_data
+            if iteration > args.max_iteration:
+                break
 
             if iteration == args.start_iteration:
+                print(images1.shape, images2.shape, labels.shape)
+                print(labels)
                 # save the first training batch for visualization
                 images = []
                 if images2 is None:
@@ -406,6 +485,7 @@ def main():
                     for i1, i2 in zip(images1.permute(0, 2, 3, 1).numpy(), images2.permute(0, 2, 3, 1).numpy()):
                         images.append(i1)
                         images.append(i2)
+                images=images[:64] 
                 cv2.imwrite('images.jpg', tile_images(images), params=[int(cv2.IMWRITE_JPEG_QUALITY), 98])
 
 
@@ -440,7 +520,7 @@ def main():
             #    #loss = loss_object(all_emb, all_labels, miner_output)
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                embedding = img_encoder(images)
+                embedding = model(images)
                 #if label_history:
                 #    loss = my_loss(embedding, labels, torch.cat(embed_history, dim=0), torch.cat(label_history, dim=0))
                 #else:
@@ -482,24 +562,25 @@ def main():
 
                 test_results = {}
                 if ds_tst is not None:
-                    tst_auc, fpr, tpr, thr = test_retrieval(iteration, 'tst', img_encoder, ds_tst, device, max_img=2000, batch_size=32)
-                    test_results['tst'] = (tst_auc, fpr, tpr, thr)
+                    tst_auc, tst_mean_auc, fpr, tpr, thr, tst_map = test_retrieval(iteration, 'tst', model, ds_tst, device, max_img=2000, batch_size=32)
+                    test_results['tst'] = (tst_auc, tst_mean_auc, fpr, tpr, thr, tst_map)
                 else:
                     tst_auc = -1
-                trn_auc, fpr, tpr, thr = test_retrieval(iteration, 'trn', img_encoder, ds_trn, device, max_img=2000, batch_size=32)
-                test_results['trn'] = (trn_auc, fpr, tpr, thr)
+                    tst_mean_auc = -1
+                trn_auc, trn_mean_auc, fpr, tpr, thr, trn_map = test_retrieval(iteration, 'trn', model, ds_trn, device, max_img=2000, batch_size=32)
+                test_results['trn'] = (trn_auc, trn_mean_auc, fpr, tpr, thr, trn_map)
 
                 avg_loss = np.mean(loss_history)
-                torch.save(img_encoder.state_dict(), f'cp-{iteration:07d}.img.ckpt')
-                print(f'LOG {iteration} iterations:{iteration} trn_auc:{trn_auc:0.6f} tst_auc:{tst_auc:0.6f} loss:{avg_loss:0.6f} time:{time.time()-t1:.1f}s')
+                torch.save(model.state_dict(), f'cp-{iteration:07d}.img.ckpt')
+                print(f'LOG {iteration} iterations:{iteration} trn_auc:{trn_auc:0.6f} tnr_mauc:{trn_mean_auc:0.6f} trn_map:{trn_map:0.6f} tst_auc:{tst_auc:0.6f} tst_mauc:{tst_mean_auc:0.6f} tst_map:{tst_map:0.6f} loss:{avg_loss:0.6f} time:{time.time()-t1:.1f}s')
                 t1 = time.time()
                 test_similarities = []
                 test_labels = []
                 loss_history = []
 
                 fig, ax = plt.subplots()
-                for name, (auc, fpr, tpr, thr) in test_results.items():
-                    ax.semilogx(fpr, tpr, label=f'{name} AUC = {auc}')
+                for name, (auc, mean_auc, fpr, tpr, thr, m_ap) in test_results.items():
+                    ax.semilogx(fpr, tpr, label=f'{name} AUC = {auc}, {mean_auc}')
                 ax.legend()
                 plt.xlim([0.000001, 1])
                 plt.savefig(f'cp-auc-{iteration:07d}.png')
@@ -508,7 +589,7 @@ def main():
                 input_names = ["input_image"]
                 output_names = ["output_emb"]
                 torch.onnx.export(
-                    img_encoder,
+                    model,
                     torch.from_numpy(np.zeros((1, images1.shape[1], images1.shape[2], images1.shape[3]), dtype=np.uint8)).to(device),
                     f'{args.name}_{iteration:07d}.onnx', verbose=False, do_constant_folding=True, export_params=True,
                     input_names=input_names, output_names=output_names, opset_version=11,
@@ -517,8 +598,8 @@ def main():
 
 
                 # if dl_tst is not None:
-                #    #test(f'tsne-{iteration:07d}.trn.png', img_encoder, dl_trn, device)
-                #    test(f'tsne-{iteration:07d}.tst.png', img_encoder, dl_tst, device)
+                #    #test(f'tsne-{iteration:07d}.trn.png', model, dl_trn, device)
+                #    test(f'tsne-{iteration:07d}.tst.png', model, dl_tst, device)
             iteration += 1
 
 

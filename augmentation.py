@@ -16,7 +16,7 @@ def func_random_images_eraser(images, random_state, parents, hooks):
             image_aug[i:i+size[0], j:j+size[1]] = 0
             result.append(image_aug)
         else:
-            result.append(image)
+            result.append(image.copy())
     return result
 
 AUGMENTATIONS = {
@@ -163,6 +163,65 @@ AUGMENTATIONS = {
             ]),
             iaa.Lambda(func_images=func_random_images_eraser)
         ]),
+    'POLYP_LITE_2':
+        iaa.Sequential([
+            iaa.Fliplr(0.5),
+            iaa.Flipud(0.5),
+            iaa.OneOf([iaa.geometric.Affine(scale=(0.9, 1.1), translate_percent=(-0.03, 0.03), rotate=(-180, 180),
+                                            shear=(-15, 15), order=1),
+                       iaa.geometric.PerspectiveTransform(scale=0.05),
+                       ]),
+            iaa.SomeOf(n=(1, 3), children=[
+                iaa.color.AddToHue(value=(-16, 16)),
+                iaa.color.AddToBrightness(add=(-24, 24)),
+                iaa.color.AddToSaturation(value=(-24, 24)),
+                iaa.color.MultiplyBrightness(mul=(0.8, 1.2)),
+                iaa.color.MultiplySaturation(mul=(0.8, 1.2)),
+                iaa.contrast.GammaContrast(gamma=(0.7, 1.3)),
+                iaa.contrast.LogContrast(gain=(0.8, 1.2)),
+                iaa.arithmetic.AdditiveGaussianNoise(scale=(2, 10), per_channel=True),
+            ]),
+            iaa.Lambda(func_images=func_random_images_eraser)
+        ]),
+    'POLYP_LITE_3':
+        iaa.Sequential([
+            iaa.Fliplr(0.5),
+            iaa.Flipud(0.5),
+            iaa.OneOf([iaa.geometric.Affine(scale=(0.9, 1.1), translate_percent=(-0.03, 0.03), rotate=(-180, 180),
+                                            shear=(-15, 15), order=1),
+                       iaa.geometric.PerspectiveTransform(scale=0.05),
+                       ]),
+            iaa.SomeOf(n=(1, 3), children=[
+                iaa.color.AddToHue(value=(-8, 8)),
+                iaa.color.AddToBrightness(add=(-12, 12)),
+                iaa.color.AddToSaturation(value=(-12, 12)),
+                iaa.color.MultiplyBrightness(mul=(0.9, 1.1)),
+                iaa.color.MultiplySaturation(mul=(0.9, 1.1)),
+                iaa.contrast.GammaContrast(gamma=(0.8, 1.2)),
+                iaa.contrast.LogContrast(gain=(0.9, 1.1)),
+                iaa.arithmetic.AdditiveGaussianNoise(scale=(2, 10), per_channel=True),
+            ]),
+            iaa.Lambda(func_images=func_random_images_eraser)
+        ]),
+    'POLYP_LITE_4':
+        iaa.Sequential([
+            iaa.Fliplr(0.5),
+            iaa.Flipud(0.5),
+            iaa.OneOf([iaa.geometric.Affine(scale=(0.9, 1.1), translate_percent=(-0.03, 0.03), rotate=(-180, 180),
+                                            shear=(-15, 15), order=1),
+                       iaa.geometric.PerspectiveTransform(scale=0.05),
+                       ]),
+            iaa.SomeOf(n=(1, 3), children=[
+                iaa.color.AddToHue(value=(-8, 8)),
+                iaa.color.AddToBrightness(add=(-34, 34)),
+                iaa.color.AddToSaturation(value=(-24, 24)),
+                iaa.color.MultiplyBrightness(mul=(0.7, 1.3)),
+                iaa.color.MultiplySaturation(mul=(0.8, 1.2)),
+                iaa.contrast.GammaContrast(gamma=(0.5, 2)),
+                iaa.contrast.LogContrast(gain=(0.7, 1.5)),
+            ]),
+            iaa.Lambda(func_images=func_random_images_eraser)
+        ]),
     'POLYP_GEOMETRIC':
         iaa.Sequential([
             iaa.Fliplr(0.5),
@@ -171,6 +230,12 @@ AUGMENTATIONS = {
                                             shear=(-15, 15), order=1),
                        iaa.geometric.PerspectiveTransform(scale=0.05),
                        ]),
+            iaa.Lambda(func_images=func_random_images_eraser)
+        ]),
+    'FLIP':
+        iaa.Sequential([
+            iaa.Fliplr(0.5),
+            iaa.Flipud(0.5),
             iaa.Lambda(func_images=func_random_images_eraser)
         ]),
 

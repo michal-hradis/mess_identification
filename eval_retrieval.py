@@ -18,7 +18,7 @@ def parseargs():
     parser.add_argument('--db-list', required=True)
     parser.add_argument('--emb-dim', default=128, type=int, help="Output embedding dimension.")
     parser.add_argument('--backbone-config', default='{"type":"SM","name":"resnet34","weights":"imagenet","depth":5}')
-    parser.add_argument('--decoder-config', default='{"type":"avg_pool"}')
+    parser.add_argument('--decoder-config', default='{"type": "pool", "operation": "avg"}')
     args = parser.parse_args()
     return args
 

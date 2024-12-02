@@ -23,7 +23,7 @@ def net_factory(encoder_config, decoder_config, emb_dim, normalize=True):
         print(f'Features {i} {f.shape}')
     feature_dim = features[-1].shape[1]
 
-    if decoder_config['type'].lower() == 'avg_pool':
+    if decoder_config['type'].lower() == 'pool':
         del decoder_config['type']
         decoder = PoolingDecoder(in_channels=feature_dim, emb_dim=emb_dim, **decoder_config)
     elif decoder_config['type'].lower() == 'conv':
