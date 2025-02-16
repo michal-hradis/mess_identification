@@ -128,7 +128,7 @@ class IdDataset(torch.utils.data.Dataset):
 
         return image1, image2, idx
 
-LOSSES = ['normalized_softmax', 'xent']
+LOSSES = ['normalized_softmax', 'xent', 'arcface']
 
 def parseargs():
     parser = argparse.ArgumentParser(usage='Trains contrastive self-supervised training on artificial data.')
@@ -144,6 +144,9 @@ def parseargs():
     parser.add_argument('--batch-size', default=64, type=int)
     parser.add_argument('--learning-rate', default=0.0002, type=float)
     parser.add_argument('--weight-decay', default=0.01, type=float)
+    parser.add_argument('--loss-learning-rate', default=0.01, type=float)
+    parser.add_argument('--loss-weight-decay', default=0.0001, type=float)
+
     parser.add_argument('--temperature', default=0.5, type=float)
     parser.add_argument('--emb-reg-weight', default=1, type=float)
     parser.add_argument('--augmentation', default='LITE', help=f'Augmentation type. The options are {AUGMENTATIONS.keys()}.')
@@ -160,7 +163,6 @@ def parseargs():
     parser.add_argument('--loss', default='xent', help=f'Loss function. The options are {LOSSES}.')
 
     args = parser.parse_args()
-    print(args)
     return args
 
 
@@ -397,12 +399,11 @@ def init_central_loss_embeddings(model: torch.nn.Module, dataset: IdDataset, los
 
 def main():
     args = parseargs()
+    logging.basicConfig(level=logging.INFO)
     logging.info(f'ARGS {args}')
 
     device = torch.device('cuda')
     #torch.multiprocessing.set_start_method('spawn')
-
-
 
     model = net_factory(args.backbone_config, args.decoder_config, emb_dim=args.emb_dim, normalize=not args.no_emb_normalization
                               ).to(device)
@@ -412,16 +413,15 @@ def main():
         checkpoint_path = f'cp-{args.start_iteration:07d}.img.ckpt'
         logging.info(f'Loading image checkpoint {checkpoint_path}')
         model.load_state_dict(torch.load(checkpoint_path, map_location=device))
-
+        logging.info(f'LOADED image checkpoint {checkpoint_path}')
 
     single_image = args.loss in ['normalized_softmax']
-
 
     #input_names = ["input_image"]
     #output_names = ["output_emb"]
     #torch.onnx.export(model, torch.from_numpy(np.zeros((1, 3, 64, 64), dtype=np.float32)).to(device), 'model.onnx', verbose=False, input_names=input_names, output_names=output_names, opset_version=11)
 
-    size_multiplier = 100
+    size_multiplier = 1
     ds_trn = IdDataset(args.lmdb, augment=args.augmentation, single_image=single_image, size_multiplier=size_multiplier)
     dl_trn = DataLoader(ds_trn, num_workers=args.loader_count, batch_size=args.batch_size, shuffle=True, drop_last=True,
                         persistent_workers=True, pin_memory=True)
@@ -435,9 +435,12 @@ def main():
 
     # Select loss
     if args.loss == 'normalized_softmax':
-        loss_fce = losses.NormalizedSoftmaxLoss(len(ds_trn) // size_multiplier, args.emb_dim, temperature=args.temperature).to(device)
+        loss_fce = losses.NormalizedSoftmaxLoss(len(ds_trn) // size_multiplier + 1, args.emb_dim, temperature=args.temperature).to(device)
         #init_central_loss_embeddings(model, ds_trn, loss_fce, device)
-        loss_optimizer = torch.optim.Adam(loss_fce.parameters(), lr=0.01)
+        loss_optimizer = torch.optim.AdamW(loss_fce.parameters(), lr=args.loss_learning_rate, weight_decay=args.loss_weight_decay)
+    elif args.loss == 'arcface':
+        loss_fce = losses.ArcFaceLoss(num_classes=len(ds_trn) // size_multiplier + 1, embedding_size=args.emb_dim).to(device)
+        loss_optimizer = torch.optim.AdamW(loss_fce.parameters(), lr=args.loss_learning_rate, weight_decay=args.loss_weight_decay)
     elif args.loss == 'xent':
         loss_fce = partial(my_loss, temperature=args.temperature)
         loss_optimizer = None
@@ -446,9 +449,9 @@ def main():
         exit(-1)
 
     if args.train_only_decoder:
-        optimizer = torch.optim.AdamW(model.decoder.parameters(), lr=args.learning_rate)
+        optimizer = torch.optim.AdamW(model.decoder.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     else:
-        optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
 
     loss_history = []
     iteration = args.start_iteration
@@ -474,7 +477,6 @@ def main():
                 break
 
             if iteration == args.start_iteration:
-                print(images1.shape, images2.shape, labels.shape)
                 print(labels)
                 # save the first training batch for visualization
                 images = []
@@ -486,7 +488,7 @@ def main():
                         images.append(i1)
                         images.append(i2)
                 images=images[:64] 
-                cv2.imwrite('images.jpg', tile_images(images), params=[int(cv2.IMWRITE_JPEG_QUALITY), 98])
+                #cv2.imwrite('images.jpg', tile_images(images), params=[int(cv2.IMWRITE_JPEG_QUALITY), 98])
 
 
             #print(unique_labels, ' '.join([str(i) for i in labels]))
