@@ -21,14 +21,14 @@ import os
 import random
 
 class IdDataset(torch.utils.data.Dataset):
-    def __init__(self, lmdb_path, augment=None, size_multiplier=1, single_image=False):
+    def __init__(self, lmdb_path, augment=None, size_multiplier=1, single_image=False, key_index=[0, 1]):
         super().__init__()
         self.lmdb_path = lmdb_path
         self.txn = None
         self.augment = augment
         self.aug = None
         self.size_multiplier = size_multiplier
-        self.key_index = [0, 1]
+        self.key_index = key_index
         self.single_image = single_image
 
         with lmdb.open(self.lmdb_path, readonly=True) as env:
@@ -97,6 +97,12 @@ class IdDataset(torch.utils.data.Dataset):
         id_key = self.parse_key(key)
         return image, self.key_to_idx[id_key]
 
+    def get_all_id_images(self, idx: int) -> (np.ndarray, int):
+        self.init()
+        key = self.key_list[idx]
+        images = [self._read_img(k) for k in self.keys[key]]
+        return images
+
     def __getitem__(self, idx) -> (torch.Tensor, torch.Tensor, int):
         self.init()
 
@@ -135,7 +141,9 @@ def parseargs():
     parser.add_argument('--lmdb', required=True, help='Path to lmdb DB..')
     parser.add_argument('--lmdb-tst', required=False, help='Path to lmdb DB..')
     parser.add_argument('--name', default='model', help='Name of the experiment and model.')
-
+    parser.add_argument('--key-index', default = [0, 1], type=int, nargs='+', help='File names in lmdb (keys) contain ID. '
+                                                                                   'The file name is split by "_" and the '
+                                                                                   'indices are used to extract the unique identity ID.')
     parser.add_argument('--start-iteration', default=0, type=int)
     parser.add_argument('--max-iteration', default=500000, type=int)
     parser.add_argument('--view-step', default=50, type=int, help="Number of training iterations between network testing.")
@@ -255,10 +263,22 @@ def test_retrieval(iteration, name, model, dataset, device, max_img=2000, batch_
     t_start = time.time()
     all_images = []
     all_labels = []
-    for i in range(min(max_img, dataset.image_count())):
-        img, label = dataset.get_image(i)
-        all_images.append(img)
-        all_labels.append(label)
+
+    seed = 0
+    identity_count = len(dataset)
+    identity_parmutation = np.random.RandomState(seed).permutation(identity_count)
+
+    for i in identity_parmutation:
+        images = dataset.get_all_id_images(i)
+
+        # select random images from the identity, but this hast to be repeatable
+        if len(images) > 6:
+            images = np.random.RandomState(seed).permutation(identity_count)
+
+        all_images.extend(images)
+        all_labels.extend([i] * len(images))
+        if len(all_images) > max_img:
+            break
 
     # get uqiue labels
     #all_labels = np.asarray(all_labels)
@@ -422,13 +442,14 @@ def main():
     #torch.onnx.export(model, torch.from_numpy(np.zeros((1, 3, 64, 64), dtype=np.float32)).to(device), 'model.onnx', verbose=False, input_names=input_names, output_names=output_names, opset_version=11)
 
     size_multiplier = 1
-    ds_trn = IdDataset(args.lmdb, augment=args.augmentation, single_image=single_image, size_multiplier=size_multiplier)
+    ds_trn = IdDataset(args.lmdb, augment=args.augmentation, single_image=single_image, size_multiplier=size_multiplier,
+                       key_index=args.key_index)
     dl_trn = DataLoader(ds_trn, num_workers=args.loader_count, batch_size=args.batch_size, shuffle=True, drop_last=True,
                         persistent_workers=True, pin_memory=True)
     print(f'TRN DATASET LEN: {len(ds_trn)}')
 
     if args.lmdb_tst:
-        ds_tst = IdDataset(args.lmdb_tst, augment=None, size_multiplier=1, single_image=single_image)
+        ds_tst = IdDataset(args.lmdb_tst, augment=None, size_multiplier=1, single_image=single_image, key_index=args.key_index)
         print(f'TST DATASET LEN: {len(ds_tst)}')
     else:
         ds_tst = None
