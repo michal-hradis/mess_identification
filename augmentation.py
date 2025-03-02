@@ -19,8 +19,34 @@ def func_random_images_eraser(images, random_state, parents, hooks):
             result.append(image.copy())
     return result
 
+
+def crop_random_offset(images, random_state, parents, hooks, crop_size=(64, 64), offset_range=4):
+    crops = []
+    h, w = images[0].shape[0:2]
+    crop_h, crop_w = crop_size
+
+    # Compute the top-left coordinates of the center crop
+    base_y = (h - crop_h) // 2
+    base_x = (w - crop_w) // 2
+
+    for img in images:
+
+        # Generate random offsets within [-offset_range, offset_range]
+        offset_y = np.random.randint(-offset_range, offset_range + 1)
+        offset_x = np.random.randint(-offset_range, offset_range + 1)
+
+        # Apply the random offsets
+        y1 = base_y + offset_y
+        x1 = base_x + offset_x
+
+        crops.append(np.copy(img[y1:y1 + crop_h, x1:x1 + crop_w]))
+    return crops
+
+
 AUGMENTATIONS = {
     'NONE': iaa.Identity(),
+    'CROP_4PX': iaa.Lambda(func_images=lambda images, random_state, parents, hooks:
+                        crop_random_offset(images, random_state, parents, hooks, crop_size=(64, 64), offset_range=4)),
     'UNIVERSAL':
     iaa.Sequential([
         iaa.OneOf([iaa.geometric.Affine(scale=(0.85, 1.15), translate_percent=(-0.05, 0.05), rotate=(-5, 5),
@@ -241,6 +267,7 @@ AUGMENTATIONS = {
 
 
 
+
 'LITE':
     iaa.Sequential([
         iaa.Fliplr(0.5),
@@ -272,11 +299,11 @@ AUGMENTATIONS = {
     ]),
    'LITE_MASK':
     iaa.Sequential([
-        iaa.OneOf([iaa.geometric.Affine(scale=(0.9, 1.1), translate_percent=(-0.03, 0.03), rotate=(-5, 5),
-                                        shear=(-10, 10), order=1),
+        iaa.OneOf([iaa.geometric.Affine(scale=(0.95, 1.05), translate_percent=(-0.03, 0.03), rotate=(-5, 5),
+                                        shear=(-5, 5), order=1),
                    iaa.geometric.PerspectiveTransform(scale=0.05)
                    ]),
-        iaa.SomeOf(n=(1, 4), children=[
+        iaa.SomeOf(n=(0, 3), children=[
             iaa.convolutional.DirectedEdgeDetect(alpha=(0.05, 0.15), direction=(0.0, 1.0)),
             iaa.convolutional.EdgeDetect(alpha=(0.05, 0.10)),
             iaa.convolutional.Emboss(alpha=(0.05, 0.15), strength=(0.2, 0.6)),
