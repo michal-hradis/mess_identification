@@ -31,7 +31,7 @@ class IdDataset(torch.utils.data.Dataset):
         self.key_index = key_index
         self.single_image = single_image
 
-        with lmdb.open(self.lmdb_path, readonly=True) as env:
+        with lmdb.open(self.lmdb_path, readonly=True, readahead=False) as env:
             with env.begin(write=False) as txn:
                 all_keys = list(txn.cursor().iternext(values=False))#[:5000]
 
@@ -81,7 +81,7 @@ class IdDataset(torch.utils.data.Dataset):
 
     def init(self):
         if self.txn is None:
-            env = lmdb.open(self.lmdb_path, readonly=True)
+            env = lmdb.open(self.lmdb_path, readonly=True, readahead=False)
             self.txn = env.begin(write=False)
             if self.augment:
                 self.aug = AUGMENTATIONS[self.augment]
@@ -273,7 +273,8 @@ def test_retrieval(iteration, name, model, dataset, device, max_img=2000, batch_
 
         # select random images from the identity, but this hast to be repeatable
         if len(images) > 6:
-            images = np.random.RandomState(seed).permutation(identity_count)
+            selected = np.random.RandomState(seed).permutation(len(images))[:6]
+            images = [images[i] for i in selected]
 
         all_images.extend(images)
         all_labels.extend([i] * len(images))
@@ -417,6 +418,20 @@ def init_central_loss_embeddings(model: torch.nn.Module, dataset: IdDataset, los
             wMat[:, l] = embeddings
 
 
+def export_model(model: torch.nn.Module, images: torch.Tensor, name: str, iteration: int):
+    traced_model = torch.jit.trace(model, images[:128])
+    torch.jit.save(traced_model, f'{name}_{iteration:07d}.pt')
+
+    if False:
+        input_names = ["input_image"]
+        output_names = ["output_emb"]
+        torch.onnx.export(
+            model, images.to(model.device),
+            f'{name}_{iteration:07d}.onnx', verbose=False, do_constant_folding=True, export_params=True,
+            input_names=input_names, output_names=output_names, opset_version=11,
+            # dynamic_axes={'input_image': {0, 'batch_size'}, 'output': {0: 'batch_size'}}
+        )
+
 def main():
     args = parseargs()
     logging.basicConfig(level=logging.INFO)
@@ -508,8 +523,8 @@ def main():
                     for i1, i2 in zip(images1.permute(0, 2, 3, 1).numpy(), images2.permute(0, 2, 3, 1).numpy()):
                         images.append(i1)
                         images.append(i2)
-                images=images[:64] 
-                #cv2.imwrite('images.jpg', tile_images(images), params=[int(cv2.IMWRITE_JPEG_QUALITY), 98])
+                # images=images[:64]
+                # cv2.imwrite('images.jpg', tile_images(images), params=[int(cv2.IMWRITE_JPEG_QUALITY), 98])
 
 
             #print(unique_labels, ' '.join([str(i) for i in labels]))
@@ -576,6 +591,8 @@ def main():
                 test_similarities.append(torch.mm(embedding, embedding.t()).detach().cpu().numpy())
 
             if iteration % args.view_step == 0 and iteration > args.start_iteration:
+                export_model(model, images, name=args.name, iteration=iteration)
+
                 print('SIMILARITIES', test_similarities[-1].min(), test_similarities[-1].max())
                 fig, ax = plt.subplots()
                 heatmap = ax.imshow(test_similarities[-1])
@@ -583,14 +600,16 @@ def main():
                 plt.savefig(f'cp-{iteration:07d}.png')
                 plt.close('all')
 
+                max_test_img = 5000
+
                 test_results = {}
                 if ds_tst is not None:
-                    tst_auc, tst_mean_auc, fpr, tpr, thr, tst_map = test_retrieval(iteration, 'tst', model, ds_tst, device, max_img=2000, batch_size=32)
+                    tst_auc, tst_mean_auc, fpr, tpr, thr, tst_map = test_retrieval(iteration, 'tst', model, ds_tst, device, max_img=max_test_img, batch_size=32)
                     test_results['tst'] = (tst_auc, tst_mean_auc, fpr, tpr, thr, tst_map)
                 else:
                     tst_auc = -1
                     tst_mean_auc = -1
-                trn_auc, trn_mean_auc, fpr, tpr, thr, trn_map = test_retrieval(iteration, 'trn', model, ds_trn, device, max_img=2000, batch_size=32)
+                trn_auc, trn_mean_auc, fpr, tpr, thr, trn_map = test_retrieval(iteration, 'trn', model, ds_trn, device, max_img=max_test_img, batch_size=32)
                 test_results['trn'] = (trn_auc, trn_mean_auc, fpr, tpr, thr, trn_map)
 
                 avg_loss = np.mean(loss_history)
@@ -608,17 +627,6 @@ def main():
                 plt.xlim([0.000001, 1])
                 plt.savefig(f'cp-auc-{iteration:07d}.png')
                 plt.close('all')
-
-                input_names = ["input_image"]
-                output_names = ["output_emb"]
-                torch.onnx.export(
-                    model,
-                    torch.from_numpy(np.zeros((1, images1.shape[1], images1.shape[2], images1.shape[3]), dtype=np.uint8)).to(device),
-                    f'{args.name}_{iteration:07d}.onnx', verbose=False, do_constant_folding=True, export_params=True,
-                    input_names=input_names, output_names=output_names, opset_version=11,
-                    #dynamic_axes={'input_image': {0, 'batch_size'}, 'output': {0: 'batch_size'}}
-                    )
-
 
                 # if dl_tst is not None:
                 #    #test(f'tsne-{iteration:07d}.trn.png', model, dl_trn, device)
