@@ -8,6 +8,7 @@ from torchvision.models.optical_flow import raft_small, Raft_Small_Weights, raft
 import torchvision.transforms as T
 import torch
 import lmdb
+from cnn_descriptor import LocalDescriptor
 
 def extract_patch(img: np.ndarray, kp: cv2.KeyPoint, patch_size: int) -> np.ndarray:
     """
@@ -59,7 +60,7 @@ def extract_patch(img: np.ndarray, kp: cv2.KeyPoint, patch_size: int) -> np.ndar
     patch = cv2.warpAffine(img, M_inverse, (patch_size, patch_size), flags=cv2.INTER_LINEAR)
     return patch
 
-def compute_homography(img1: np.ndarray, img2: np.ndarray) -> np.ndarray:
+def compute_homography(img1: np.ndarray, img2: np.ndarray, local_descriptor_model: LocalDescriptor = None) -> np.ndarray:
     """
     Compute the homography matrix that maps points from img1 to img2.
 
@@ -76,25 +77,40 @@ def compute_homography(img1: np.ndarray, img2: np.ndarray) -> np.ndarray:
 
     for sigma in [1.6, 2.5, 3.5, 1.4, 1.2]:
         # Initialize SIFT detector.
-        sift = cv2.SIFT_create(20000, 3, sigma=sigma)
+        if local_descriptor_model is None:
+            sift = cv2.SIFT_create(20000, 3, sigma=sigma)
 
-        t1 = time.time()
-        # Find keypoints and descriptors.
-        kp1, des1 = sift.detectAndCompute(gray1, None)
-        kp2, des2 = sift.detectAndCompute(gray2, None)
-        t2 = time.time()
+            t1 = time.time()
+            # Find keypoints and descriptors.
+            kp1, des1 = sift.detectAndCompute(gray1, None)
+            kp2, des2 = sift.detectAndCompute(gray2, None)
+            t2 = time.time()
 
-        # Use pytorch to compute the matches
-        desc1_t = torch.from_numpy(des1).to('cuda').float()
-        desc2_t = torch.from_numpy(des2).to('cuda').float()
-        desc1_t = desc1_t / desc1_t.norm(dim=1)[:, None]
-        desc2_t = desc2_t / desc2_t.norm(dim=1)[:, None]
+            # Use pytorch to compute the matches
+            desc1_t = torch.from_numpy(des1).to('cuda').float()
+            desc2_t = torch.from_numpy(des2).to('cuda').float()
+            desc1_t = desc1_t / desc1_t.norm(dim=1)[:, None]
+            desc2_t = desc2_t / desc2_t.norm(dim=1)[:, None]
+        else:
+            t1 = time.time()
+            orb = cv2.ORB_create(nfeatures=2000)
+            kp1 = orb.detect(gray1, None)
+            kp2 = orb.detect(gray2, None)
+
+            t2 = time.time()
+            kp1 = local_descriptor_model.filter_points_kp(img1, kp1)
+            kp2 = local_descriptor_model.filter_points_kp(img2, kp2)
+            desc1_t = local_descriptor_model.process_page_kp(img1, kp1)
+            desc2_t = local_descriptor_model.process_page_kp(img2, kp2)
+
+
+
         sim = torch.mm(desc1_t, desc2_t.t())
         matches = torch.topk(sim, k=2, dim=1)
 
         # Apply Lowe's ratio test to filter good matches.
         good_matches = []
-        sim_threshold = 0.9
+        sim_threshold = 0.93
         match_indices = matches.indices.cpu().numpy()
         match_similarities = matches.values.cpu().numpy()
         for i in range(match_indices.shape[0]):
@@ -108,7 +124,7 @@ def compute_homography(img1: np.ndarray, img2: np.ndarray) -> np.ndarray:
 
         # Estimate homography using RANSAC.
         if len(src_pts) > 30:
-            H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 15.0)
+            H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 15.0, confidence=0.9999)
         else:
             H = None
             mask = np.zeros(1, dtype=np.uint8)
@@ -118,6 +134,8 @@ def compute_homography(img1: np.ndarray, img2: np.ndarray) -> np.ndarray:
             break
         else:
             H = None
+            if local_descriptor_model is not None:
+                break
 
     return H
 
@@ -233,8 +251,9 @@ def main():
     parser.add_argument('--patch-size', type=int, default=80, help='Size of the extracted patches.')
     parser.add_argument('--output-path', type=str, default='./output/', help='Path to save the extracted patches.')
     parser.add_argument('--output-prefix', type=str, default='patch', help='Prefix for the output patch filenames.')
-    parser.add_argument('--output-lmdb', type=str, default='./output.lmdb', help='Path to save the extracted patches.')
+    parser.add_argument('--output-lmdb', type=str,  help='Path to save the extracted patches.')
     parser.add_argument("--grid-step", type=int, default=32, help="Step size for the grid points.")
+    parser.add_argument("--model", type=str, help="Local descriptor model to use.")
 
     args = parser.parse_args()
 
@@ -243,6 +262,8 @@ def main():
     reference_image = cv2.imread(args.images[0])
     reference_image = cv2.resize(reference_image, (reference_image.shape[1] // 2, reference_image.shape[0] // 2),
                                  interpolation=cv2.INTER_AREA)
+
+    local_descriptor_model = LocalDescriptor(args.model) if args.model else None
 
     DEVICE = 'cuda'
     #of_model = raft_small(weights=Raft_Small_Weights.DEFAULT, progress=False).to(DEVICE)
@@ -258,12 +279,11 @@ def main():
         env = lmdb.open(args.output_lmdb, map_size=1024 ** 4)
 
 
-
     for image_id, img_path in enumerate(args.images[1:]):
         img2 = cv2.imread(img_path)
         img2 = cv2.resize(img2, (img2.shape[1] // 2, img2.shape[0] // 2), interpolation=cv2.INTER_AREA)
 
-        H = compute_homography(img2, reference_image)
+        H = compute_homography(img2, reference_image, local_descriptor_model)
 
         if H is None:
             logging.info(f"Failed to compute homography for {img_path}")
