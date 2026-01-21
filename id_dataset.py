@@ -89,7 +89,7 @@ class IdDataset(torch.utils.data.Dataset):
     def __getitem__(self, class_idx):
         self.init()
 
-        class_idx = class_idx % len(self.key_list)
+        class_idx = class_idx % len(self.class_sample_list)
         class_samples = self.class_sample_list[class_idx]
         class_id, video_id = self.keys_parsed_int[class_samples[0]]
 
