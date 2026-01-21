@@ -15,6 +15,7 @@ import lmdb
 from sklearn.metrics import roc_curve, roc_auc_score, average_precision_score
 from nets import net_factory
 from augmentation import AUGMENTATIONS
+from domain_adaptation import EmbeddingModelWithDomainAdaptation
 from pytorch_metric_learning import losses
 from tqdm import tqdm
 from functools import partial
@@ -57,6 +58,18 @@ def parseargs():
     parser.add_argument('--batch-history', default=0, type=int, help="Number of old batches used for distance matrix.")
 
     parser.add_argument('--loss', default='xent', help=f'Loss function. The options are {LOSSES}.')
+
+    # Domain Adaptation arguments
+    parser.add_argument('--use-domain-adaptation', action='store_true',
+                        help='Enable domain adaptation with gradient reversal to improve domain robustness.')
+    parser.add_argument('--domain-loss-weight', default=0.1, type=float,
+                        help='Weight for the domain adaptation loss.')
+    parser.add_argument('--domain-hidden-dims', default=[256, 128], type=int, nargs='+',
+                        help='Hidden layer dimensions for domain classifier MLP.')
+    parser.add_argument('--domain-dropout', default=0.5, type=float,
+                        help='Dropout probability for domain classifier.')
+    parser.add_argument('--domain-grl-lambda', default=1.0, type=float,
+                        help='Gradient reversal lambda parameter (strength of gradient reversal).')
 
     args = parser.parse_args()
     return args
@@ -337,21 +350,21 @@ def main():
     device = torch.device('cuda')
     #torch.multiprocessing.set_start_method('spawn')
 
-    model = net_factory(args.backbone_config, args.decoder_config, emb_dim=args.emb_dim, normalize=not args.no_emb_normalization
+    base_model = net_factory(args.backbone_config, args.decoder_config, emb_dim=args.emb_dim, normalize=not args.no_emb_normalization
                               ).to(device)
 
-    print(model)
+    print(base_model)
     if args.start_iteration > 0:
         checkpoint_path = f'cp-{args.start_iteration:07d}.img.ckpt'
         logging.info(f'Loading image checkpoint {checkpoint_path}')
-        model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+        base_model.load_state_dict(torch.load(checkpoint_path, map_location=device))
         logging.info(f'LOADED image checkpoint {checkpoint_path}')
 
     single_image = args.loss in ['normalized_softmax']
 
     #input_names = ["input_image"]
     #output_names = ["output_emb"]
-    #torch.onnx.export(model, torch.from_numpy(np.zeros((1, 3, 64, 64), dtype=np.float32)).to(device), 'model.onnx', verbose=False, input_names=input_names, output_names=output_names, opset_version=11)
+    #torch.onnx.export(base_model, torch.from_numpy(np.zeros((1, 3, 64, 64), dtype=np.float32)).to(device), 'model.onnx', verbose=False, input_names=input_names, output_names=output_names, opset_version=11)
 
     size_multiplier = 1
     ds_trn = IdDataset(args.lmdb, augment=args.augmentation, single_image=single_image, size_multiplier=size_multiplier,
@@ -365,6 +378,25 @@ def main():
         print(f'TST DATASET LEN: {len(ds_tst)}')
     else:
         ds_tst = None
+
+    # Wrap model with domain adaptation if enabled
+    if args.use_domain_adaptation:
+        num_domains = len(ds_trn.video_uuid_to_int)
+        logging.info(f'Domain Adaptation enabled with {num_domains} domains (video_ids)')
+        logging.info(f'Domain classifier hidden dims: {args.domain_hidden_dims}')
+        logging.info(f'Domain loss weight: {args.domain_loss_weight}')
+        logging.info(f'Domain GRL lambda: {args.domain_grl_lambda}')
+
+        model = EmbeddingModelWithDomainAdaptation(
+            base_model,
+            num_domains=num_domains,
+            domain_hidden_dims=args.domain_hidden_dims,
+            domain_dropout=args.domain_dropout
+        ).to(device)
+        model.set_grl_lambda(args.domain_grl_lambda)
+    else:
+        model = base_model
+        logging.info('Domain Adaptation disabled')
 
     # Select loss
     if args.loss == 'normalized_softmax':
@@ -450,10 +482,12 @@ def main():
                 if images2 is None:
                     images = images1
                     labels = labels.to(device)
+                    video_ids = video_ids.to(device)
                 else:
                     images2 = images2.to(device)
                     images = torch.cat([images1, images2], dim=0)
                     labels = torch.cat([labels, labels]).to(device)
+                    video_ids = torch.cat([video_ids, video_ids]).to(device)
 
 
             if iteration - args.start_iteration <= args.warmup_iterations:
@@ -475,11 +509,22 @@ def main():
                 images = images.float() / 255.0
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                embedding = model(images)
+                # Forward pass - get embeddings and optionally domain logits
+                if args.use_domain_adaptation:
+                    embedding, domain_logits = model(images, return_domain_logits=True)
+                else:
+                    embedding = model(images)
+
+                # Compute main embedding loss
                 #if label_history:
                 #    loss = my_loss(embedding, labels, torch.cat(embed_history, dim=0), torch.cat(label_history, dim=0))
                 #else:
                 loss = loss_fce(embedding, labels)
+
+                # Add domain adaptation loss if enabled
+                if args.use_domain_adaptation:
+                    domain_loss = torch.nn.functional.cross_entropy(domain_logits, video_ids)
+                    loss = loss + args.domain_loss_weight * domain_loss
 
 
             loss = loss + args.emb_reg_weight * torch.mean(embedding ** 2)
@@ -530,7 +575,13 @@ def main():
                 test_results['trn'] = (trn_auc, trn_mean_auc, fpr, tpr, thr, trn_map)
 
                 avg_loss = np.mean(loss_history)
-                torch.save(model.state_dict(), f'cp-{iteration:07d}.img.ckpt')
+
+                # Save checkpoint - only base model without domain adaptation head
+                if args.use_domain_adaptation:
+                    torch.save(model.get_embedding_model().state_dict(), f'cp-{iteration:07d}.img.ckpt')
+                else:
+                    torch.save(model.state_dict(), f'cp-{iteration:07d}.img.ckpt')
+
                 print(f'LOG {iteration} iterations:{iteration} trn_auc:{trn_auc:0.6f} tnr_mauc:{trn_mean_auc:0.6f} trn_map:{trn_map:0.6f} tst_auc:{tst_auc:0.6f} tst_mauc:{tst_mean_auc:0.6f} tst_map:{tst_map:0.6f} loss:{avg_loss:0.6f} time:{time.time()-t1:.1f}s')
                 t1 = time.time()
                 test_similarities = []
