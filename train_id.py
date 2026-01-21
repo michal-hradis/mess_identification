@@ -421,7 +421,7 @@ def init_central_loss_embeddings(model: torch.nn.Module, dataset: IdDataset, los
 
 def export_model(model: torch.nn.Module, images: torch.Tensor, name: str, iteration: int):
     model.eval()
-    export_input = torch.randint(0, 256, (128, 3, images.shape[2], images.shape[3]), dtype=torch.uint8).to(model.device)
+    export_input = torch.randint(0, 256, (128, 3, images.shape[2], images.shape[3]), dtype=torch.uint8).to(images.device)
     traced_model = torch.jit.trace(model, export_input)
     torch.jit.save(traced_model, f'{name}_{iteration:07d}.pt')
     model.train()
