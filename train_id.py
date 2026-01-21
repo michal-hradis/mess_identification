@@ -158,6 +158,7 @@ def parseargs():
     parser.add_argument('--temperature', default=0.5, type=float)
     parser.add_argument('--emb-reg-weight', default=1, type=float)
     parser.add_argument('--augmentation', default='LITE', help=f'Augmentation type. The options are {AUGMENTATIONS.keys()}.')
+    parser.add_argument('--gpu-augmentation', help=f'Augmentation on GPU. The options are ["aug_1"].')
     parser.add_argument('--warmup-iterations', default=100, type=float)
     parser.add_argument('--train-only-decoder', action='store_true', help='The encoder is frozen and only the decoder is trained.')
     parser.add_argument('--no-emb-normalization', action='store_true', help="Do not normalize embeddings. Normalizes to unit length by default.")
@@ -420,7 +421,7 @@ def init_central_loss_embeddings(model: torch.nn.Module, dataset: IdDataset, los
 
 def export_model(model: torch.nn.Module, images: torch.Tensor, name: str, iteration: int):
     model.eval()
-    export_input = torch.randint(0, 256, (128, 3, 64, 64), dtype=torch.uint8)
+    export_input = torch.randint(0, 256, (128, 3, images.shape[2], images.shape[3]), dtype=torch.uint8).to(model.device)
     traced_model = torch.jit.trace(model, export_input)
     torch.jit.save(traced_model, f'{name}_{iteration:07d}.pt')
     model.train()
@@ -486,6 +487,14 @@ def main():
     else:
         logging.error(f'Unknown loss function "{args.loss}". Available options are {LOSSES}.')
         exit(-1)
+
+    if args.gpu_augmentation:
+        import augmentations_gpu
+        aug_gpu = augmentations_gpu.GPU_AUGMENTATIONS[args.gpu_augmentation]
+        logging.info(f'Using GPU augmentation: {aug_gpu}')
+        aug_gpu = aug_gpu.to(device)
+    else:
+        aug_gpu = None
 
     if args.train_only_decoder:
         optimizer = torch.optim.AdamW(model.decoder.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
@@ -559,6 +568,9 @@ def main():
 
             #    #miner_output = miner(all_emb, all_labels)
             #    #loss = loss_object(all_emb, all_labels, miner_output)
+
+            if aug_gpu is not None:
+                images = images.float() / 255.0
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 embedding = model(images)
