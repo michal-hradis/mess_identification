@@ -17,7 +17,6 @@ from augmentation import AUGMENTATIONS
 from pytorch_metric_learning import losses
 from tqdm import tqdm
 from functools import partial
-import os
 import random
 
 class IdDataset(torch.utils.data.Dataset):
@@ -33,7 +32,7 @@ class IdDataset(torch.utils.data.Dataset):
 
         with lmdb.open(self.lmdb_path, readonly=True, readahead=False) as env:
             with env.begin(write=False) as txn:
-                all_keys = list(txn.cursor().iternext(values=False))#[:5000]
+                all_keys = list(txn.cursor().iternext(values=False))
 
         self.keys = defaultdict(list)
         for k in all_keys:
@@ -86,7 +85,6 @@ class IdDataset(torch.utils.data.Dataset):
             if self.augment:
                 self.aug = AUGMENTATIONS[self.augment]
 
-
     def image_count(self):
         return len(self.all_keys)
 
@@ -137,7 +135,9 @@ class IdDataset(torch.utils.data.Dataset):
 LOSSES = ['normalized_softmax', 'xent', 'arcface']
 
 def parseargs():
-    parser = argparse.ArgumentParser(usage='Trains contrastive self-supervised training on artificial data.')
+    parser = argparse.ArgumentParser(usage='Trains contrastive self-supervised networks on groups of images with augmentation '
+                                           'The trained models should be used for retrieval, clustering, and fine-tuned for '
+                                           'downstream tasks.')
     parser.add_argument('--lmdb', required=True, help='Path to lmdb DB..')
     parser.add_argument('--lmdb-tst', required=False, help='Path to lmdb DB..')
     parser.add_argument('--name', default='model', help='Name of the experiment and model.')
@@ -200,7 +200,7 @@ def my_loss(emb, labels, temperature=1,  old_emb=None, old_labels=None):
         denominator = torch.sum(sim * neg, dim=1, keepdim=True) + torch.sum(sim_old, dim=1, keepdim=True) + numerator
     else:
         denominator = torch.sum(sim * neg, dim=1, keepdim=True) + numerator
-    loss = -torch.log(numerator / denominator + 1e-20) * pos
+    loss = -torch.log(numerator + 1e-20) + torch.log(denominator + 1e-20) * pos
     loss = torch.sum(loss) / torch.sum(pos)
     
     return loss
@@ -419,8 +419,11 @@ def init_central_loss_embeddings(model: torch.nn.Module, dataset: IdDataset, los
 
 
 def export_model(model: torch.nn.Module, images: torch.Tensor, name: str, iteration: int):
-    traced_model = torch.jit.trace(model, images[:128])
+    model.eval()
+    export_input = torch.randint(0, 256, (128, 3, 64, 64), dtype=torch.uint8)
+    traced_model = torch.jit.trace(model, export_input)
     torch.jit.save(traced_model, f'{name}_{iteration:07d}.pt')
+    model.train()
 
     if False:
         input_names = ["input_image"]
