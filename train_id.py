@@ -1,136 +1,23 @@
 import argparse
-import sys
 import time
 from torch.utils.data import DataLoader
 import torch
 import numpy as np
 import cv2
 import matplotlib
+
+from id_dataset import IdDataset
+
 matplotlib.use('agg')
 import matplotlib.pyplot as plt
 import logging
 import lmdb
 from sklearn.metrics import roc_curve, roc_auc_score, average_precision_score
-from collections import defaultdict
 from nets import net_factory
 from augmentation import AUGMENTATIONS
 from pytorch_metric_learning import losses
 from tqdm import tqdm
 from functools import partial
-import random
-
-class IdDataset(torch.utils.data.Dataset):
-    def __init__(self, lmdb_path, augment=None, size_multiplier=1, single_image=False, key_index=[0, 1]):
-        super().__init__()
-        self.lmdb_path = lmdb_path
-        self.txn = None
-        self.augment = augment
-        self.aug = None
-        self.size_multiplier = size_multiplier
-        self.key_index = key_index
-        self.single_image = single_image
-
-        with lmdb.open(self.lmdb_path, readonly=True, readahead=False) as env:
-            with env.begin(write=False) as txn:
-                all_keys = list(txn.cursor().iternext(values=False))
-
-        self.keys = defaultdict(list)
-        for k in all_keys:
-            self.keys[self.parse_key(k)].append(k)
-
-        #if not self.augment:
-        #    self.restrict_data()
-
-        self.key_list = list(self.keys)
-        self.all_keys = all_keys
-        self.key_to_idx = {k: i for i, k in enumerate(self.key_list)}
-        print(f"Unique keys: {len(self.key_list)}")
-        print(f"Max id size: {max([len(self.keys[k]) for k in self.keys])}")
-        print(f"Max id value: {max([v for v in self.key_to_idx.values()])}")
-
-    def parse_key(self, k: str) -> str:
-       k = k.decode().split('_')
-       k = [k[i] for i in self.key_index]
-       return '_'.join(k)
-
-    def restrict_data(self, max_id=2000, max_id_size=2):
-        import random
-        ids = list(self.keys)
-        random.shuffle(ids)
-        ids = ids[:max_id]
-        for i in self.keys:
-            random.shuffle(self.keys[i])
-        self.keys = {i: self.keys[i][:max_id_size] for i in ids}
-
-    def __len__(self):
-        return len(self.key_list)
-
-    def _read_img(self, name):
-        data = self.txn.get(name)
-        if data is None:
-            print(
-                f"Unable to load value for key '{name.decode()}' from DB '{self.lmdb_path}'.", file=sys.stderr)
-            return None
-        image = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
-        if image is None:
-            print(f"Unable to decode image '{name.decode()}'.", file=sys.stderr)
-            return None
-
-        return image
-
-    def init(self):
-        if self.txn is None:
-            env = lmdb.open(self.lmdb_path, readonly=True, readahead=False)
-            self.txn = env.begin(write=False)
-            if self.augment:
-                self.aug = AUGMENTATIONS[self.augment]
-
-    def image_count(self):
-        return len(self.all_keys)
-
-    def get_image(self, idx: int) -> (np.ndarray, int):
-        self.init()
-        key = self.all_keys[idx]
-        image = self._read_img(key)
-        id_key = self.parse_key(key)
-        return image, self.key_to_idx[id_key]
-
-    def get_all_id_images(self, idx: int) -> (np.ndarray, int):
-        self.init()
-        key = self.key_list[idx]
-        images = [self._read_img(k) for k in self.keys[key]]
-        return images
-
-    def __getitem__(self, idx) -> (torch.Tensor, torch.Tensor, int):
-        self.init()
-
-        idx = idx % len(self.key_list)
-        key_idx = self.key_list[idx]
-        if self.single_image:
-            keys = self.keys[key_idx]
-            keys = [random.choice(keys)]
-            images = [self._read_img(key) for key in keys]
-            if self.aug is not None:
-                image, = self.aug(images=images)
-            else:
-                image, = images
-            return torch.from_numpy(image).permute(2, 0, 1), idx
-
-        elif len(self.keys[key_idx]) == 1:
-            keys = [self.keys[key_idx][0], self.keys[key_idx][0]]
-        else:
-            keys = np.random.choice(self.keys[key_idx], 2, replace=False)
-
-        images = [self._read_img(key) for key in keys]
-        if self.aug is not None:
-            image1, image2 = self.aug(images=images)
-        else:
-            image1, image2 = images
-
-        image1 = torch.from_numpy(image1).permute(2, 0, 1)
-        image2 = torch.from_numpy(image2).permute(2, 0, 1)
-
-        return image1, image2, idx
 
 LOSSES = ['normalized_softmax', 'xent', 'arcface']
 
@@ -215,11 +102,17 @@ def test(iteration, name, model, dataset, device, max_img, max_query_img):
     with torch.no_grad():
         model = model.eval()
         for i in range(min(max_img, len(dataset))):
-            img1, img2, label = dataset[i]
-            batch.append(img1)
-            batch.append(img2)
-            all_labels.append(label)
-            all_labels.append(label)
+            data = dataset[i]
+            if 'image' in data:
+                # Single image mode
+                batch.append(data['image'])
+                all_labels.append(data['label'])
+            else:
+                # Two image mode
+                batch.append(data['image1'])
+                batch.append(data['image2'])
+                all_labels.append(data['label'])
+                all_labels.append(data['label'])
             if len(batch) >= 32:
                 batch = torch.stack(batch, dim=0).to(device)
                 res = model(batch).cpu().numpy()
@@ -389,7 +282,7 @@ def init_central_loss_embeddings(model: torch.nn.Module, dataset: IdDataset, los
         batch = []
         model.eval()
         for i in tqdm(range(dataset.image_count())):
-            img, label = dataset.get_image(i)
+            img, label, video_id = dataset.get_image(i)
             batch.append(img)
             all_labels.append(label)
             if len(batch) >= batch_size:
@@ -516,11 +409,20 @@ def main():
             break
 
         for batch_data in dl_trn:
-            if len(batch_data) == 2:
-                images1, labels = batch_data
+            # Handle dictionary batch data
+            if 'image' in batch_data:
+                # Single image mode
+                images1 = batch_data['image']
+                labels = batch_data['label']
+                video_ids = batch_data['video_id']
                 images2 = None
             else:
-                images1, images2, labels = batch_data
+                # Two image mode
+                images1 = batch_data['image1']
+                images2 = batch_data['image2']
+                labels = batch_data['label']
+                video_ids = batch_data['video_id']
+
             if iteration > args.max_iteration:
                 break
 
