@@ -66,7 +66,7 @@ def parseargs():
                         help='Weight for the domain adaptation loss.')
     parser.add_argument('--domain-hidden-dims', default=[256, 128], type=int, nargs='+',
                         help='Hidden layer dimensions for domain classifier MLP.')
-    parser.add_argument('--domain-dropout', default=0.5, type=float,
+    parser.add_argument('--domain-dropout', default=0.0, type=float,
                         help='Dropout probability for domain classifier.')
     parser.add_argument('--domain-grl-lambda', default=1.0, type=float,
                         help='Gradient reversal lambda parameter (strength of gradient reversal).')
@@ -384,6 +384,7 @@ def main():
         num_domains = len(ds_trn.video_uuid_to_int)
         logging.info(f'Domain Adaptation enabled with {num_domains} domains (video_ids)')
         logging.info(f'Domain classifier hidden dims: {args.domain_hidden_dims}')
+        logging.info(f'Domain classifier classes: {num_domains}')
         logging.info(f'Domain loss weight: {args.domain_loss_weight}')
         logging.info(f'Domain GRL lambda: {args.domain_grl_lambda}')
 

@@ -48,7 +48,7 @@ class IdDataset(torch.utils.data.Dataset):
         return '_'.join(k), k[0]
 
     def __len__(self):
-        return len(self.keys_parsed)
+        return len(self.all_classes)
 
     def _read_img(self, name):
         data = self.txn.get(name)

@@ -94,7 +94,7 @@ class EmbeddingModelWithDomainAdaptation(nn.Module):
     Wrapper for EmbeddingModel that adds optional domain adaptation head.
     """
     def __init__(self, embedding_model, num_domains=None, domain_hidden_dims=[256, 128],
-                 domain_dropout=0.5):
+                 domain_dropout=0.0):
         """
         Args:
             embedding_model: The base embedding model
