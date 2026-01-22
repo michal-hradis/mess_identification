@@ -1,5 +1,7 @@
 import argparse
 import time
+from collections import defaultdict
+
 from torch.utils.data import DataLoader
 import torch
 import numpy as np
@@ -371,11 +373,11 @@ def main():
                        key_index=args.key_index)
     dl_trn = DataLoader(ds_trn, num_workers=args.loader_count, batch_size=args.batch_size, shuffle=True, drop_last=True,
                         persistent_workers=True, pin_memory=True)
-    print(f'TRN DATASET LEN: {len(ds_trn)}')
+    logging.info(f'TRN DATASET LEN: {len(ds_trn)}')
 
     if args.lmdb_tst:
         ds_tst = IdDataset(args.lmdb_tst, augment=None, size_multiplier=1, single_image=single_image, key_index=args.key_index)
-        print(f'TST DATASET LEN: {len(ds_tst)}')
+        logging.info(f'TST DATASET LEN: {len(ds_tst)}')
     else:
         ds_tst = None
 
@@ -427,7 +429,7 @@ def main():
     else:
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
 
-    loss_history = []
+    loss_history = defaultdict(list)
     iteration = args.start_iteration
 
     to_test = 20
@@ -520,15 +522,21 @@ def main():
                 #if label_history:
                 #    loss = my_loss(embedding, labels, torch.cat(embed_history, dim=0), torch.cat(label_history, dim=0))
                 #else:
-                loss = loss_fce(embedding, labels)
 
-                # Add domain adaptation loss if enabled
-                if args.use_domain_adaptation:
-                    domain_loss = torch.nn.functional.cross_entropy(domain_logits, video_ids)
-                    loss = loss + args.domain_loss_weight * domain_loss
+            loss = loss_fce(embedding, labels)
+            loss_history["main"].append(loss.item())
 
+            # Add domain adaptation loss if enabled
+            if args.use_domain_adaptation:
+                domain_loss = args.domain_loss_weight * torch.nn.functional.cross_entropy(domain_logits, video_ids)
+                loss_history["domain"].append(domain_loss.item())
+                loss = loss + domain_loss
 
-            loss = loss + args.emb_reg_weight * torch.mean(embedding ** 2)
+            if args.emb_reg_weight > 0:
+                emb_reg_loss = args.emb_reg_weight * torch.mean(embedding ** 2)
+                loss_history["emb_reg"].append(loss.item())
+                loss = loss +  emb_reg_loss
+
             loss.backward()
             optimizer.step()
 
@@ -537,7 +545,7 @@ def main():
                 loss_optimizer.zero_grad()
 
             optimizer.zero_grad()
-            loss_history.append(loss.item())
+            loss_history["full"].append(loss.item())
 
             #sim = torch.mm(embedding, embedding.t()).detach().cpu().numpy()
             #print(f'SIM: {lr} {iteration} {sim.min()} {sim.max()}')
@@ -575,15 +583,15 @@ def main():
                 trn_auc, trn_mean_auc, fpr, tpr, thr, trn_map = test_retrieval(iteration, 'trn', model, ds_trn, device, max_img=max_test_img, batch_size=32)
                 test_results['trn'] = (trn_auc, trn_mean_auc, fpr, tpr, thr, trn_map)
 
-                avg_loss = np.mean(loss_history)
-
                 # Save checkpoint - only base model without domain adaptation head
                 if args.use_domain_adaptation:
                     torch.save(model.get_embedding_model().state_dict(), f'cp-{iteration:07d}.img.ckpt')
                 else:
                     torch.save(model.state_dict(), f'cp-{iteration:07d}.img.ckpt')
 
-                print(f'LOG {iteration} iterations:{iteration} trn_auc:{trn_auc:0.6f} tnr_mauc:{trn_mean_auc:0.6f} trn_map:{trn_map:0.6f} tst_auc:{tst_auc:0.6f} tst_mauc:{tst_mean_auc:0.6f} tst_map:{tst_map:0.6f} loss:{avg_loss:0.6f} time:{time.time()-t1:.1f}s')
+                losses_str = ' '.join([f'{k}:{np.mean(v):0.5f}' for k, v in loss_history.items()])
+
+                print(f'LOG {iteration} iterations:{iteration} {losses_str} trn_auc:{trn_auc:0.6f} tnr_mauc:{trn_mean_auc:0.6f} trn_map:{trn_map:0.6f} tst_auc:{tst_auc:0.6f} tst_mauc:{tst_mean_auc:0.6f} tst_map:{tst_map:0.6f} time:{time.time()-t1:.1f}s')
                 t1 = time.time()
                 test_similarities = []
                 test_labels = []
