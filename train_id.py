@@ -595,7 +595,7 @@ def main():
                 t1 = time.time()
                 test_similarities = []
                 test_labels = []
-                loss_history = []
+                loss_history = defaultdict(list)
 
                 fig, ax = plt.subplots()
                 for name, (auc, mean_auc, fpr, tpr, thr, m_ap) in test_results.items():
