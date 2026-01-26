@@ -13,7 +13,7 @@ from tqdm import tqdm
 class IdentityTrainer:
     """Handles training loop and optimization for identity learning."""
 
-    def __init__(self, model, loss_fn, optimizer, args, device, loss_optimizer=None):
+    def __init__(self, model, loss_fn, optimizer, args, device, loss_optimizer=None, clearml_task=None):
         """
         Initialize trainer.
 
@@ -24,6 +24,7 @@ class IdentityTrainer:
             args: Command line arguments
             device: Device to train on
             loss_optimizer: Optional optimizer for loss function parameters
+            clearml_task: Optional ClearML Task for logging
         """
         self.model = model
         self.loss_fn = loss_fn
@@ -33,6 +34,13 @@ class IdentityTrainer:
         self.device = device
         self.loss_history = defaultdict(list)
         self.iteration = args.start_iteration
+
+        # ClearML logging
+        self.clearml_task = clearml_task
+        self.clearml_logger = None
+        if self.clearml_task is not None:
+            self.clearml_logger = self.clearml_task.get_logger()
+            logging.info('ClearML logger initialized')
 
         # Batch history for contrastive learning
         self.embed_history = []
@@ -88,6 +96,10 @@ class IdentityTrainer:
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = lr
 
+            # Log learning rate to ClearML
+            if self.clearml_logger is not None:
+                self.clearml_logger.report_scalar("training", "learning_rate", iteration=self.iteration, value=lr)
+
     def compute_loss(self, embedding, labels, video_ids, domain_logits=None):
         """
         Compute total loss with all components.
@@ -105,7 +117,12 @@ class IdentityTrainer:
         loss = self.loss_fn(embedding, labels)
         self.loss_history["main"].append(loss.item())
 
+        # Log to ClearML
+        if self.clearml_logger is not None:
+            self.clearml_logger.report_scalar("loss", "main", iteration=self.iteration, value=loss.item())
+
         # Add domain adaptation loss if enabled
+        domain_accuracy = None
         if self.args.use_domain_adaptation and domain_logits is not None:
             domain_loss = self.args.domain_loss_weight * torch.nn.functional.cross_entropy(
                 domain_logits, video_ids
@@ -113,13 +130,32 @@ class IdentityTrainer:
             self.loss_history["domain"].append(domain_loss.item())
             loss = loss + domain_loss
 
+            # Compute domain classification accuracy
+            with torch.no_grad():
+                domain_preds = torch.argmax(domain_logits, dim=1)
+                domain_accuracy = (domain_preds == video_ids).float().mean().item()
+
+            # Log to ClearML
+            if self.clearml_logger is not None:
+                self.clearml_logger.report_scalar("loss", "domain", iteration=self.iteration, value=domain_loss.item())
+                self.clearml_logger.report_scalar("metrics", "domain_accuracy", iteration=self.iteration, value=domain_accuracy)
+
         # Add embedding regularization
         if self.args.emb_reg_weight > 0:
             emb_reg_loss = self.args.emb_reg_weight * torch.mean(embedding ** 2)
             self.loss_history["emb_reg"].append(emb_reg_loss.item())
             loss = loss + emb_reg_loss
 
+            # Log to ClearML
+            if self.clearml_logger is not None:
+                self.clearml_logger.report_scalar("loss", "emb_reg", iteration=self.iteration, value=emb_reg_loss.item())
+
         self.loss_history["full"].append(loss.item())
+
+        # Log total loss to ClearML
+        if self.clearml_logger is not None:
+            self.clearml_logger.report_scalar("loss", "total", iteration=self.iteration, value=loss.item())
+
         return loss
 
     def train_step(self, batch_data):

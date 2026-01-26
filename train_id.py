@@ -65,6 +65,10 @@ def parseargs():
     parser.add_argument('--domain-grl-lambda', default=1.0, type=float,
                         help='Gradient reversal lambda parameter (strength of gradient reversal).')
 
+    # ClearML logging arguments
+    parser.add_argument('--project', default=None, type=str,
+                        help='ClearML project name. If provided, enables ClearML logging.')
+
     args = parser.parse_args()
     return args
 
@@ -75,6 +79,15 @@ def main():
     args = parseargs()
     logging.basicConfig(level=logging.INFO)
     logging.info(f'ARGS {args}')
+
+    # Initialize ClearML if project name is provided
+    clearml_task = None
+    if args.project:
+        from clearml import Task
+        task_name = args.name
+        clearml_task = Task.init(project_name=args.project, task_name=task_name)
+        clearml_task.connect(args)
+        logging.info(f'ClearML logging enabled: project={args.project}, task={task_name}')
 
     device = torch.device('cuda')
 
@@ -167,7 +180,7 @@ def main():
         )
 
     # Create trainer and evaluator
-    trainer = IdentityTrainer(model, loss_fce, optimizer, args, device, loss_optimizer)
+    trainer = IdentityTrainer(model, loss_fce, optimizer, args, device, loss_optimizer, clearml_task)
     evaluator = RetrievalEvaluator(device, batch_size=32)
 
     t1 = time.time()
@@ -264,6 +277,20 @@ def main():
                       f'trn_auc:{trn_auc:0.6f} trn_mauc:{trn_mean_auc:0.6f} trn_map:{trn_map:0.6f} '
                       f'tst_auc:{tst_auc:0.6f} tst_mauc:{tst_mean_auc:0.6f} tst_map:{tst_map:0.6f} '
                       f'time:{time.time()-t1:.1f}s')
+
+                # Log evaluation metrics to ClearML
+                if clearml_task is not None:
+                    clearml_logger = clearml_task.get_logger()
+                    clearml_logger.report_scalar("eval/train", "auc", iteration=trainer.iteration, value=trn_auc)
+                    clearml_logger.report_scalar("eval/train", "mean_auc", iteration=trainer.iteration, value=trn_mean_auc)
+                    clearml_logger.report_scalar("eval/train", "mean_ap", iteration=trainer.iteration, value=trn_map)
+
+                    if tst_results is not None:
+                        clearml_logger.report_scalar("eval/test", "auc", iteration=trainer.iteration, value=tst_auc)
+                        clearml_logger.report_scalar("eval/test", "mean_auc", iteration=trainer.iteration, value=tst_mean_auc)
+                        clearml_logger.report_scalar("eval/test", "mean_ap", iteration=trainer.iteration, value=tst_map)
+
+                    clearml_logger.report_scalar("timing", "evaluation_time", iteration=trainer.iteration, value=time.time()-t1)
 
                 # Plot ROC curves
                 evaluator.plot_roc_curve(test_results, f'cp-auc-{trainer.iteration:07d}.png')
