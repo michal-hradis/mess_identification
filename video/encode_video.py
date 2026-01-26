@@ -86,14 +86,16 @@ def main():
         frame_image = cv2.resize(frame, (args.image_resolution, args.image_resolution), interpolation=cv2.INTER_AREA)
 
         frame_net = cv2.resize(frame, (args.net_resolution, args.net_resolution), interpolation=cv2.INTER_AREA)
-        frame_net = frame_net[:, :, ::-1].transpose(2, 0, 1)[np.newaxis, :, :, :].copy()
+        # `frame` is in RGB. The model expects RGB input (channels last -> channels first), so do not flip.
+        frame_net = frame_net.transpose(2, 0, 1)[np.newaxis, :, :, :].copy()
         frame_net = torch.from_numpy(frame_net).to(device)
 
         with torch.no_grad():
             features = model(frame_net).cpu().numpy()
             frames_features.append(features)
             frame_times.append(t)
-            cv2.imwrite(f'{args.output_dir}/{frame_id:04d}.jpg', frame_image)
+            # Convert RGB to BGR for OpenCV imwrite
+            cv2.imwrite(f'{args.output_dir}/{frame_id:04d}.jpg', frame_image[:, :, ::-1])
             frame_id += 1
 
     with open(f'{args.output_dir}/frame_times.json', 'w') as f:

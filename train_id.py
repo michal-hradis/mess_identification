@@ -222,7 +222,7 @@ def main():
                         tst_results['similarities']
                     )
                     if tst_collage is not None:
-                        cv2.imwrite(f'result-tst-{trainer.iteration:07d}.jpg', tst_collage)
+                        cv2.imwrite(f'result-tst-{trainer.iteration:07d}.jpg', tst_collage[:, :, ::-1])
                 else:
                     tst_results = None
 
@@ -239,7 +239,8 @@ def main():
                     trn_results['similarities']
                 )
                 if trn_collage is not None:
-                    cv2.imwrite(f'result-trn-{trainer.iteration:07d}.jpg', trn_collage)
+                    # `trn_collage` is in RGB (internal representation). Convert to BGR for OpenCV imwrite.
+                    cv2.imwrite(f'result-trn-{trainer.iteration:07d}.jpg', trn_collage[:, :, ::-1])
 
                 # Save checkpoint
                 trainer.save_checkpoint()
