@@ -4,7 +4,7 @@ import cv2
 import json
 import argparse
 from torchcodec.decoders import VideoDecoder
-from nets import net_factory
+from code.nets import net_factory
 import tqdm
 import os
 

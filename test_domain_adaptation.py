@@ -4,7 +4,7 @@ Verifies gradient reversal and domain classifier functionality.
 """
 import torch
 import torch.nn as nn
-from domain_adaptation import (
+from code.domain_adaptation import (
     GradientReversalLayer,
     DomainClassifier,
     EmbeddingModelWithDomainAdaptation

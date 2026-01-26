@@ -6,13 +6,13 @@ from torch.utils.data import DataLoader
 import torch
 import cv2
 
-from id_dataset import IdDataset
-from nets import net_factory
-from augmentation import AUGMENTATIONS
-from domain_adaptation import EmbeddingModelWithDomainAdaptation
-from losses import get_loss_function
-from evaluation import RetrievalEvaluator
-from trainer import IdentityTrainer, tile_images
+from code.id_dataset import IdDataset
+from code.nets import net_factory
+from code.augmentation import AUGMENTATIONS
+from code.domain_adaptation import EmbeddingModelWithDomainAdaptation
+from code.losses import get_loss_function
+from code.evaluation import RetrievalEvaluator
+from trainer import IdentityTrainer
 
 LOSSES = ['normalized_softmax', 'xent', 'arcface']
 

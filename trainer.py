@@ -1,5 +1,4 @@
 """Trainer class for identity learning."""
-import time
 import logging
 from collections import defaultdict
 import numpy as np
@@ -46,7 +45,7 @@ class IdentityTrainer:
         # GPU augmentation
         self.aug_gpu = None
         if args.gpu_augmentation:
-            import augmentations_gpu
+            from code import augmentations_gpu
             self.aug_gpu = augmentations_gpu.GPU_AUGMENTATIONS[args.gpu_augmentation]
             logging.info(f'Using GPU augmentation: {self.aug_gpu}')
             self.aug_gpu = self.aug_gpu.to(device)

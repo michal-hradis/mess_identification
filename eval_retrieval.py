@@ -7,7 +7,7 @@ import logging
 import lmdb
 import torchvision
 from sklearn.metrics import average_precision_score
-from nets import net_factory
+from code.nets import net_factory
 
 
 def parseargs():
