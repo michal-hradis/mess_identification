@@ -7,7 +7,7 @@ from collections import defaultdict
 
 import numpy as np
 
-from code.augmentation import AUGMENTATIONS
+from common.augmentation import AUGMENTATIONS
 
 
 class IdDataset(torch.utils.data.Dataset):

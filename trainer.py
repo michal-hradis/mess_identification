@@ -45,7 +45,7 @@ class IdentityTrainer:
         # GPU augmentation
         self.aug_gpu = None
         if args.gpu_augmentation:
-            from code import augmentations_gpu
+            from common import augmentations_gpu
             self.aug_gpu = augmentations_gpu.GPU_AUGMENTATIONS[args.gpu_augmentation]
             logging.info(f'Using GPU augmentation: {self.aug_gpu}')
             self.aug_gpu = self.aug_gpu.to(device)
