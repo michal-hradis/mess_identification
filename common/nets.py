@@ -1,8 +1,8 @@
 import torch
 import json
 import logging
-from nets_pretrained import PoolingDecoder, ConvDecoder, PretrainedEncoder, EmbeddingModel
-from nets_att_decoders import AttDecoder
+from common.nets_pretrained import PoolingDecoder, ConvDecoder, PretrainedEncoder, EmbeddingModel
+from common.nets_att_decoders import AttDecoder
 
 def net_factory(encoder_config, decoder_config, emb_dim, normalize=True):
     if type(encoder_config) == str:

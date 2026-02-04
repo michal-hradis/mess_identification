@@ -25,7 +25,8 @@ def show_results(txn, ids, image_keys):
     print('b', ids)
     image_keys = [image_keys[i] for i in ids]
     data = [txn.get(image_key) for image_key in image_keys]
-    images = [cv2.imdecode(np.frombuffer(d, dtype=np.uint8), cv2.IMREAD_COLOR) for d in data]
+    # decode (BGR) -> convert to RGB for internal representation
+    images = [cv2.imdecode(np.frombuffer(d, dtype=np.uint8), cv2.IMREAD_COLOR)[:, :, ::-1] for d in data]
     lines = [np.concatenate(images[i:i+8], axis=1) for i in range(0, len(images), 8)]
     return np.concatenate(lines, axis=0)
 
@@ -49,7 +50,8 @@ def main():
     with torch.no_grad():
         for i, image_key in enumerate(all_keys):
             data = txn.get(image_key)
-            image = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+            # decode BGR -> convert to RGB
+            image = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)[:, :, ::-1]
             image = torch.unsqueeze(transform(image), dim=0).to(device)
             embeddings.append(img_encoder(image).cpu().numpy())
             if i % 100 == 0:
@@ -66,7 +68,8 @@ def main():
         most_similar = [id] + np.argsort(sim).tolist()[::-1]
         print(sim[most_similar[:64]], sim.min())
         images = show_results(txn, most_similar[:64], all_keys)
-        cv2.imshow('results', images)
+        # show_results returns an RGB collage; convert to BGR for OpenCV display
+        cv2.imshow('results', images[:, :, ::-1])
         key = cv2.waitKey()
         if key == 27:
             break
