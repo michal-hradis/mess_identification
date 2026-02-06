@@ -119,36 +119,50 @@ class VideoDataset(torch.utils.data.Dataset):
 
         return image
 
-    def _sample_frame_indices(self, num_available: int) -> list[int]:
-        """Sample consecutive frame indices with random gaps."""
-        # Calculate maximum starting index
-        max_span = (self.num_frames - 1) * self.max_frame_gap
+    def _sample_frame_indices(self, frames_list: list[tuple[int, str]]) -> list[int]:
+        """Sample consecutive frame indices respecting actual frame_id gaps.
+
+        Args:
+            frames_list: List of (frame_id, key) tuples sorted by frame_id
+
+        Returns:
+            List of indices into frames_list representing a valid sequence
+        """
+        num_available = len(frames_list)
 
         if num_available <= self.num_frames:
             # Not enough frames, sample with replacement
             return sorted(random.choices(range(num_available), k=self.num_frames))
 
-        if num_available <= max_span:
-            # Sample without maximum gap constraint
-            start_idx = 0
-            available_range = num_available - 1
-        else:
-            # Sample with gap constraint
-            start_idx = random.randint(0, num_available - max_span - 1)
-            available_range = max_span
+        # Find all valid starting positions
+        valid_starts = []
 
-        # Sample frame offsets
-        frame_indices = [start_idx]
-        current_idx = start_idx
+        for start_idx in range(num_available - self.num_frames + 1):
+            # Check if we can get num_frames starting from start_idx
+            # with all gaps <= max_frame_gap
+            is_valid = True
 
-        for _ in range(self.num_frames - 1):
-            # Sample gap between 1 and max_frame_gap
-            max_gap = min(self.max_frame_gap, start_idx + available_range - current_idx)
-            gap = random.randint(1, max(1, max_gap))
-            current_idx = min(current_idx + gap, start_idx + available_range)
-            frame_indices.append(current_idx)
+            for i in range(self.num_frames - 1):
+                frame_id_curr = frames_list[start_idx + i][0]
+                frame_id_next = frames_list[start_idx + i + 1][0]
+                gap = frame_id_next - frame_id_curr
 
-        return frame_indices
+                if gap > self.max_frame_gap:
+                    is_valid = False
+                    break
+
+            if is_valid:
+                valid_starts.append(start_idx)
+
+        if not valid_starts:
+            # No valid sequence found, fall back to sampling any consecutive frames
+            # This can happen if max_frame_gap is too restrictive
+            start_idx = random.randint(0, num_available - self.num_frames)
+            return list(range(start_idx, start_idx + self.num_frames))
+
+        # Randomly select one valid starting position
+        start_idx = random.choice(valid_starts)
+        return list(range(start_idx, start_idx + self.num_frames))
 
     def __len__(self) -> int:
         return len(self.video_ids)
@@ -164,7 +178,7 @@ class VideoDataset(torch.utils.data.Dataset):
         frames_list = self.video_frames[video_id]
 
         # Sample frame indices
-        sampled_indices = self._sample_frame_indices(len(frames_list))
+        sampled_indices = self._sample_frame_indices(frames_list)
 
         # Load frames
         frames = []
