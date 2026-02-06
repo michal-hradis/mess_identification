@@ -50,11 +50,13 @@ def test_temporal_predictor():
         max_frames=16
     )
 
-    # Test input
-    embeddings = torch.randn(2, 8, 256)
-    predictions = predictor(embeddings)
+    # Test input: 4 context frames, predict 4 target frames
+    context_embeddings = torch.randn(2, 4, 256)
+    target_positions = torch.tensor([[4, 5, 6, 7], [4, 5, 6, 7]])  # (B, T_target)
 
-    assert predictions.shape == (2, 8, 256), f"Expected (2, 8, 256), got {predictions.shape}"
+    predictions = predictor(context_embeddings, target_positions)
+
+    assert predictions.shape == (2, 4, 256), f"Expected (2, 4, 256), got {predictions.shape}"
 
     print("✓ TemporalPredictor test passed!")
 

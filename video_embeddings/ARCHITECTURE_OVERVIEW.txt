@@ -1,0 +1,173 @@
+"""
+JEPA Video Embedding Model Architecture
+========================================
+
+TRAINING FLOW:
+==============
+
+Input Video Frames: (B, T, 3, H, W) uint8
+            |
+            v
+    Split into Context & Target
+            |
+    +-------+-------+
+    |               |
+    v               v
+Context         Target
+(first 4)      (remaining)
+    |               |
+    v               v
+┌─────────────┐  ┌─────────────┐
+│  STUDENT    │  │  TEACHER    │
+│  ENCODER    │  │  ENCODER    │
+│ (trainable) │  │ (EMA, no    │
+│             │  │  gradients) │
+└─────────────┘  └─────────────┘
+    |               |
+    v               v
+Context          Target
+Embeddings      Embeddings
+(B, 4, D)       (B, T-4, D)
+    |               |
+    |               +-- TARGETS (ground truth)
+    v
+┌─────────────┐
+│  TEMPORAL   │
+│  PREDICTOR  │
+│(transformer)│
+└─────────────┘
+    |
+    v
+Predicted
+Embeddings
+(B, T-4, D)
+    |
+    +-- PREDICTIONS
+
+    Compare predictions vs targets → Loss
+    Optimize student encoder & predictor
+    Update teacher with EMA: θ_t = α·θ_t + (1-α)·θ_s
+
+
+COMPONENTS IN DETAIL:
+=====================
+
+1. FrameEncoder
+   ------------
+   Input: (B, 3, H, W) uint8 or float
+
+   ┌──────────────┐
+   │ Base Encoder │ ← ResNet, EfficientNet, etc.
+   └──────────────┘
+          ↓
+   ┌──────────────┐
+   │ AdaptivePool │ ← Pool spatial dimensions
+   └──────────────┘
+          ↓
+   ┌──────────────┐
+   │   Flatten    │
+   └──────────────┘
+          ↓
+   ┌──────────────┐
+   │   Linear +   │ ← Project to embedding_dim
+   │  LayerNorm   │
+   └──────────────┘
+          ↓
+   ┌──────────────┐
+   │  Normalize   │ ← L2 normalize (optional)
+   └──────────────┘
+
+   Output: (B, D) embeddings
+
+
+2. TemporalPredictor
+   -----------------
+   Input: context_embeddings (B, T_c, D)
+          target_positions (B, T_t)
+
+   ┌──────────────┐
+   │  Add Pos Emb │ ← Learnable position embeddings
+   └──────────────┘
+          ↓
+   ┌──────────────┐
+   │ Transformer  │ ← Multi-head self-attention
+   │   Encoder    │    N layers
+   └──────────────┘
+          ↓
+   ┌──────────────┐
+   │   Context    │ ← Aggregate context info
+   │   Features   │
+   └──────────────┘
+          ↓
+   ┌──────────────┐
+   │ Target Pos   │ ← Get pos emb for targets
+   │  Embeddings  │
+   └──────────────┘
+          ↓
+   ┌──────────────┐
+   │   Combine    │ ← context_mean + target_pos
+   └──────────────┘
+          ↓
+   ┌──────────────┐
+   │ Output Proj  │ ← Linear projection
+   └──────────────┘
+
+   Output: (B, T_t, D) predictions
+
+
+3. JEPAVideoModel
+   --------------
+   Complete model combining all components
+
+   Student Path (trainable):
+   - Encode context frames
+   - Predict target embeddings
+
+   Teacher Path (no gradients):
+   - Encode target frames
+   - Provide ground truth
+
+   EMA Update:
+   - After each training step
+   - Teacher ← α·Teacher + (1-α)·Student
+
+
+USAGE EXAMPLE:
+==============
+
+# Create components
+student = FrameEncoder(base_encoder, embedding_dim=256)
+teacher = FrameEncoder(base_encoder_copy, embedding_dim=256)
+predictor = TemporalPredictor(embedding_dim=256, num_heads=8)
+
+# Build JEPA model
+model = JEPAVideoModel(student, teacher, predictor, ema_decay=0.999)
+
+# Training
+frames = load_video_frames()  # (B, 8, 3, 224, 224)
+predictions, targets = model(frames, context_frames=4)
+loss = criterion(predictions, targets)
+loss.backward()
+optimizer.step()
+model.update_teacher()  # EMA update
+
+# Inference
+with torch.no_grad():
+    embeddings = model.encode_video(frames)  # (B, 8, 256)
+    video_emb = embeddings.mean(dim=1)  # (B, 256)
+
+
+KEY DESIGN CHOICES:
+===================
+
+1. Student-Teacher: Prevents collapse, no negative samples needed
+2. EMA updates: Stable teacher, smooth learning
+3. Learnable positions: More flexible than sinusoidal
+4. Context + target split: Temporal prediction task
+5. Transformer predictor: Captures temporal dependencies
+6. Flexible encoder: Works with any vision backbone
+7. RGB format: Consistent with standard vision pipelines
+8. uint8 input: Memory efficient, auto-converted
+
+"""
+
