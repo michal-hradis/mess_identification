@@ -171,6 +171,7 @@ def parse_args():
 
 
 def main():
+    torch.set_float32_matmul_precision('high')
     args = parse_args()
     logging.basicConfig(level=logging.INFO)
 
@@ -310,10 +311,11 @@ def main():
         precision=args.precision,
         callbacks=callbacks,
         logger=loggers,
-        val_check_interval=args.val_check_interval,
+        check_val_every_n_epoch=20,
+        #val_check_interval=args.val_check_interval,
         accumulate_grad_batches=args.accumulate_grad_batches,
         gradient_clip_val=1.0,
-        log_every_n_steps=50,
+        log_every_n_steps=10,
         enable_model_summary=True
     )
 
