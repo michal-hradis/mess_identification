@@ -5,11 +5,12 @@ This module implements a student-teacher architecture for video embedding learni
 - TemporalPredictor: Transformer-based predictor with learnable temporal position embeddings
 - JEPAVideoModel: Complete model with EMA-updated teacher encoder
 """
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple
-import copy
+from typing import Tuple
 
 
 class FrameEncoder(nn.Module):
@@ -50,9 +51,8 @@ class FrameEncoder(nn.Module):
                 else:
                     raise ValueError(f"Unexpected encoder output shape: {features.shape}")
             except Exception as e:
-                # Fallback if test forward fails
-                encoder_dim = 512
-                self.pool = nn.AdaptiveAvgPool2d((1, 1))
+                logging.error(f"Failed to determine encoder output dimension")
+                raise ValueError(f"Error determining encoder output dimension: {e}") from e
 
         # Projection head
         self.projection = nn.Sequential(
@@ -161,7 +161,6 @@ class TemporalPredictor(nn.Module):
             predictions: Predicted embeddings for target frames, shape (B, T_target, D)
         """
         B, T_context, D = context_embeddings.shape
-        T_target = target_positions.shape[1]
 
         # Add positional embeddings to context
         context_pos = torch.arange(T_context, device=context_embeddings.device)
@@ -256,9 +255,24 @@ class JEPAVideoModel(nn.Module):
         # Ensure we have enough frames
         assert T > context_frames, f"Need more than {context_frames} frames, got {T}"
 
-        # Split into context and target frames
-        context_frames_tensor = frames[:, :context_frames]  # (B, context_frames, C, H, W)
-        target_frames_tensor = frames[:, context_frames:]   # (B, T-context_frames, C, H, W)
+        # Randomly sample context frame indices for each batch element
+        context_indices = torch.stack([
+            torch.randperm(T, device=frames.device)[:context_frames].sort()[0]
+            for _ in range(B)
+        ])  # (B, context_frames)
+
+        # Create target indices (all frames not in context)
+        all_indices = torch.arange(T, device=frames.device).unsqueeze(0).expand(B, -1)  # (B, T)
+        target_mask = torch.ones(B, T, dtype=torch.bool, device=frames.device)
+        target_mask.scatter_(1, context_indices, False)
+        target_indices = all_indices[target_mask].view(B, T - context_frames)  # (B, T-context_frames)
+
+        # Gather context and target frames
+        context_indices_expanded = context_indices.view(B, context_frames, 1, 1, 1).expand(B, context_frames, C, H, W)
+        target_indices_expanded = target_indices.view(B, T - context_frames, 1, 1, 1).expand(B, T - context_frames, C, H, W)
+
+        context_frames_tensor = torch.gather(frames, 1, context_indices_expanded)  # (B, context_frames, C, H, W)
+        target_frames_tensor = torch.gather(frames, 1, target_indices_expanded)   # (B, T-context_frames, C, H, W)
 
         # Flatten batch and time dimensions for encoding
         context_flat = context_frames_tensor.reshape(B * context_frames, C, H, W)
@@ -274,11 +288,7 @@ class JEPAVideoModel(nn.Module):
             target_embeddings = target_embeddings.view(B, T - context_frames, -1)  # (B, T-context_frames, D)
 
         # Predict target embeddings using predictor
-        target_positions = torch.arange(
-            context_frames, T, device=frames.device
-        ).unsqueeze(0).expand(B, -1)  # (B, T-context_frames)
-
-        predictions = self.predictor(context_embeddings, target_positions)  # (B, T-context_frames, D)
+        predictions = self.predictor(context_embeddings, target_indices)  # (B, T-context_frames, D)
 
         return predictions, target_embeddings
 

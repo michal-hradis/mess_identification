@@ -15,7 +15,7 @@ from jepa_model import FrameEncoder, TemporalPredictor, JEPAVideoModel
 from lightning_module import VideoEmbeddingModule
 
 
-def create_encoder_from_config(config: dict, embedding_dim: int):
+def create_encoder_from_config(config: dict):
     """Create encoder from configuration."""
     encoder_type = config.get('type', 'pretrained').lower()
 
@@ -233,7 +233,7 @@ def main():
         )
 
     # Create model components
-    base_encoder = create_encoder_from_config(encoder_config, args.embedding_dim)
+    base_encoder = create_encoder_from_config(encoder_config)
 
     student_encoder = FrameEncoder(
         base_encoder=base_encoder,
@@ -242,7 +242,7 @@ def main():
     )
 
     # Create teacher encoder (copy of student)
-    teacher_base_encoder = create_encoder_from_config(encoder_config, args.embedding_dim)
+    teacher_base_encoder = create_encoder_from_config(encoder_config)
     teacher_encoder = FrameEncoder(
         base_encoder=teacher_base_encoder,
         embedding_dim=args.embedding_dim,
