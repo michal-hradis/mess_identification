@@ -128,9 +128,6 @@ class VideoEmbeddingModule(pl.LightningModule):
                 pred_unique_dists = pred_pairwise_dists[:, triu_indices[0], triu_indices[1]]  # (B, T*(T-1)/2)
 
                 self.log('train.dist/pred_pairwise_dist_mean', pred_unique_dists.mean(), on_step=True, on_epoch=True)
-                self.log('train.dist/pred_pairwise_dist_std', pred_unique_dists.std(), on_step=True, on_epoch=True)
-                self.log('train.dist/pred_pairwise_dist_min', pred_unique_dists.min(), on_step=True, on_epoch=True)
-                self.log('train.dist/pred_pairwise_dist_max', pred_unique_dists.max(), on_step=True, on_epoch=True)
 
             # 2. All pairwise embedding distances within targets
             if T > 1:
@@ -143,17 +140,11 @@ class VideoEmbeddingModule(pl.LightningModule):
                 tgt_unique_dists = tgt_pairwise_dists[:, triu_indices[0], triu_indices[1]]  # (B, T*(T-1)/2)
 
                 self.log('train.dist/tgt_pairwise_dist_mean', tgt_unique_dists.mean(), on_step=True, on_epoch=True)
-                self.log('train.dist/tgt_pairwise_dist_std', tgt_unique_dists.std(), on_step=True, on_epoch=True)
-                self.log('train.dist/tgt_pairwise_dist_min', tgt_unique_dists.min(), on_step=True, on_epoch=True)
-                self.log('train.dist/tgt_pairwise_dist_max', tgt_unique_dists.max(), on_step=True, on_epoch=True)
 
             # 3. Frame-wise distances between predictions and targets
             pred_tgt_dists = torch.norm(predictions - targets, p=2, dim=2)  # (B, T)
 
             self.log('train.dist/pred_tgt_dist_mean', pred_tgt_dists.mean(), on_step=True, on_epoch=True)
-            self.log('train.dist/pred_tgt_dist_std', pred_tgt_dists.std(), on_step=True, on_epoch=True)
-            self.log('train.dist/pred_tgt_dist_min', pred_tgt_dists.min(), on_step=True, on_epoch=True)
-            self.log('train.dist/pred_tgt_dist_max', pred_tgt_dists.max(), on_step=True, on_epoch=True)
 
             # Cosine similarity between predictions and targets (frame-wise)
             pred_norm = F.normalize(predictions, p=2, dim=-1)
