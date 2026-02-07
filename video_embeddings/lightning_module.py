@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
-from typing import Optional, Dict, Any
+from typing import Optional, Dict
 
 
 class JEPALoss(nn.Module):
@@ -114,15 +114,53 @@ class VideoEmbeddingModule(pl.LightningModule):
 
         # Compute additional metrics
         with torch.no_grad():
-            # Cosine similarity between predictions and targets
+            B, T, D = predictions.shape
+
+            # 1. All pairwise embedding distances within predictions
+            if T > 1:
+                # Compute pairwise distances: (B, T, T)
+                pred_expanded_i = predictions.unsqueeze(2)  # (B, T, 1, D)
+                pred_expanded_j = predictions.unsqueeze(1)  # (B, 1, T, D)
+                pred_pairwise_dists = torch.norm(pred_expanded_i - pred_expanded_j, p=2, dim=3)  # (B, T, T)
+
+                # Get upper triangle (excluding diagonal) for unique pairs
+                triu_indices = torch.triu_indices(T, T, offset=1, device=predictions.device)
+                pred_unique_dists = pred_pairwise_dists[:, triu_indices[0], triu_indices[1]]  # (B, T*(T-1)/2)
+
+                self.log('train/pred_pairwise_dist_mean', pred_unique_dists.mean(), on_step=True, on_epoch=True)
+                self.log('train/pred_pairwise_dist_std', pred_unique_dists.std(), on_step=True, on_epoch=True)
+                self.log('train/pred_pairwise_dist_min', pred_unique_dists.min(), on_step=True, on_epoch=True)
+                self.log('train/pred_pairwise_dist_max', pred_unique_dists.max(), on_step=True, on_epoch=True)
+
+            # 2. All pairwise embedding distances within targets
+            if T > 1:
+                # Compute pairwise distances: (B, T, T)
+                tgt_expanded_i = targets.unsqueeze(2)  # (B, T, 1, D)
+                tgt_expanded_j = targets.unsqueeze(1)  # (B, 1, T, D)
+                tgt_pairwise_dists = torch.norm(tgt_expanded_i - tgt_expanded_j, p=2, dim=3)  # (B, T, T)
+
+                # Get upper triangle (excluding diagonal) for unique pairs
+                tgt_unique_dists = tgt_pairwise_dists[:, triu_indices[0], triu_indices[1]]  # (B, T*(T-1)/2)
+
+                self.log('train/tgt_pairwise_dist_mean', tgt_unique_dists.mean(), on_step=True, on_epoch=True)
+                self.log('train/tgt_pairwise_dist_std', tgt_unique_dists.std(), on_step=True, on_epoch=True)
+                self.log('train/tgt_pairwise_dist_min', tgt_unique_dists.min(), on_step=True, on_epoch=True)
+                self.log('train/tgt_pairwise_dist_max', tgt_unique_dists.max(), on_step=True, on_epoch=True)
+
+            # 3. Frame-wise distances between predictions and targets
+            pred_tgt_dists = torch.norm(predictions - targets, p=2, dim=2)  # (B, T)
+
+            self.log('train/pred_tgt_dist_mean', pred_tgt_dists.mean(), on_step=True, on_epoch=True)
+            self.log('train/pred_tgt_dist_std', pred_tgt_dists.std(), on_step=True, on_epoch=True)
+            self.log('train/pred_tgt_dist_min', pred_tgt_dists.min(), on_step=True, on_epoch=True)
+            self.log('train/pred_tgt_dist_max', pred_tgt_dists.max(), on_step=True, on_epoch=True)
+
+            # Cosine similarity between predictions and targets (frame-wise)
             pred_norm = F.normalize(predictions, p=2, dim=-1)
             tgt_norm = F.normalize(targets, p=2, dim=-1)
             cosine_sim = (pred_norm * tgt_norm).sum(dim=-1).mean()
             self.log('train/cosine_sim', cosine_sim, on_step=True, on_epoch=True)
 
-            # L2 distance
-            l2_dist = torch.norm(predictions - targets, p=2, dim=-1).mean()
-            self.log('train/l2_distance', l2_dist, on_step=True, on_epoch=True)
 
         # Update teacher with EMA
         if (self.global_step + 1) % self.ema_update_every == 0:
@@ -189,6 +227,42 @@ class VideoEmbeddingModule(pl.LightningModule):
         }
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
-        """Log learning rate."""
+        """Log learning rate and gradient statistics."""
         lr = self.optimizers().param_groups[0]['lr']
         self.log('train/lr', lr, on_step=True, on_epoch=False)
+
+    def on_before_optimizer_step(self, optimizer):
+        """Log gradient statistics before optimizer step."""
+        # Compute gradient norms for student encoder and predictor
+        grad_norms = []
+        student_grad_norms = []
+        predictor_grad_norms = []
+
+        # Collect gradients from student encoder
+        for p in self.model.student_encoder.parameters():
+            if p.grad is not None:
+                grad_norm = p.grad.data.norm(2).item()
+                grad_norms.append(grad_norm)
+                student_grad_norms.append(grad_norm)
+
+        # Collect gradients from predictor
+        for p in self.model.predictor.parameters():
+            if p.grad is not None:
+                grad_norm = p.grad.data.norm(2).item()
+                grad_norms.append(grad_norm)
+                predictor_grad_norms.append(grad_norm)
+
+        # Log overall gradient statistics
+        if grad_norms:
+            self.log('train/grad_norm_mean', sum(grad_norms) / len(grad_norms), on_step=True, on_epoch=True)
+            self.log('train/grad_norm_max', max(grad_norms), on_step=True, on_epoch=True)
+            self.log('train/grad_norm_min', min(grad_norms), on_step=True, on_epoch=True)
+
+        # Log student encoder gradient statistics
+        if student_grad_norms:
+            self.log('train/student_grad_norm_mean', sum(student_grad_norms) / len(student_grad_norms), on_step=True, on_epoch=True)
+
+        # Log predictor gradient statistics
+        if predictor_grad_norms:
+            self.log('train/predictor_grad_norm_mean', sum(predictor_grad_norms) / len(predictor_grad_norms), on_step=True, on_epoch=True)
+
