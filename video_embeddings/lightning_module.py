@@ -100,6 +100,8 @@ class VideoEmbeddingModule(pl.LightningModule):
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         frames = batch['frames']  # (B, T, C, H, W)
 
+        self.model.update_teacher()
+
         # Apply augmentation
         frames = self.apply_augmentation(frames)
 
@@ -127,7 +129,7 @@ class VideoEmbeddingModule(pl.LightningModule):
                 triu_indices = torch.triu_indices(T, T, offset=1, device=predictions.device)
                 pred_unique_dists = pred_pairwise_dists[:, triu_indices[0], triu_indices[1]]  # (B, T*(T-1)/2)
 
-                self.log('train.dist/pred_pairwise_dist_mean', pred_unique_dists.mean(), on_step=True, on_epoch=True)
+                self.log('train.dist/pred_dist_mean', pred_unique_dists.mean(), on_step=True, on_epoch=True)
 
             # 2. All pairwise embedding distances within targets
             if T > 1:
@@ -139,7 +141,7 @@ class VideoEmbeddingModule(pl.LightningModule):
                 # Get upper triangle (excluding diagonal) for unique pairs
                 tgt_unique_dists = tgt_pairwise_dists[:, triu_indices[0], triu_indices[1]]  # (B, T*(T-1)/2)
 
-                self.log('train.dist/tgt_pairwise_dist_mean', tgt_unique_dists.mean(), on_step=True, on_epoch=True)
+                self.log('train.dist/tgt_dist_mean', tgt_unique_dists.mean(), on_step=True, on_epoch=True)
 
             # 3. Frame-wise distances between predictions and targets
             pred_tgt_dists = torch.norm(predictions - targets, p=2, dim=2)  # (B, T)
